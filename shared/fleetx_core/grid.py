@@ -46,6 +46,13 @@ _BLOCKED = {CellKind.SHELF}
 # The default FLEET-X warehouse: 28 columns wide, 16 rows tall.
 # Twelve shelf blocks, vertical aisles between them, three horizontal
 # cross-aisles so a robot always has more than one way around.
+#
+# The two packing stations (DD) sit in the open band at the bottom, well apart.
+# They used to be four bays in a row ON the bottom wall, which made a dead-end
+# pocket with a single mouth: at 15+ robots they queued into it and wedged each
+# other out, and throughput fell as robots were added. Same four bays here, but
+# each one is reachable from four sides and rows 14-15 stay clear underneath as
+# a bypass, so a robot standing on a bay blocks nothing.
 DEFAULT_WAREHOUSE: Tuple[str, ...] = (
     "............................",
     "...####..####..####..####...",
@@ -60,9 +67,9 @@ DEFAULT_WAREHOUSE: Tuple[str, ...] = (
     "...####..####..####..####...",
     "...####..####..####..####...",
     "............................",
+    "PP...DD.............DD..CC..",
     "PP......................CC..",
-    "PP......................CC..",
-    "..........DDDD..............",
+    "............................",
 )
 
 

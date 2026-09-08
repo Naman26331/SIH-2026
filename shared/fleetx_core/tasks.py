@@ -62,6 +62,14 @@ class Task:
     created_at: float = 0.0
     deadline: Optional[float] = None
 
+    # True = "take it to a packing station", any one of them. The robot picks
+    # which when it collects the parcel. False = this exact square, no choice.
+    #
+    # Packing stations are interchangeable in a real warehouse. Naming one
+    # specific square in the order is what made every robot queue for the same
+    # bay while the others stood empty.
+    flexible: bool = False
+
     assigned_robot: Optional[str] = None
     status: TaskStatus = TaskStatus.QUEUED
 
@@ -105,6 +113,7 @@ class Task:
             "dropoff": [self.dropoff.x, self.dropoff.y],
             "product": self.product,
             "priority": self.priority,
+            "flexible": self.flexible,
             "status": self.status.value,
             "assigned_robot": self.assigned_robot,
             "winning_bid": (round(self.winning_bid, 1)

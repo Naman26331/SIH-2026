@@ -51,7 +51,11 @@ anyone shows this to a judge.
 |---|---|---|---|
 | 1 | Radio ticker shows `PATH_RESERVR1IONundefined% undefined` | [grid_sim/web/index.html](grid_sim/web/index.html) line ~949 | The ticker only knows how to describe three message types. We have since added four more (PATH_RESERVATION, CONFLICT_ALERT, WAIT_REPORT, YIELD_REQUEST), and they fall through to the battery line, printing `undefined% undefined`. The name is also longer than the 64px column, so it overlaps the robot id and reads as `PATH_RESERVR1ION`. Fix: give each message type its own one-line description and let the column grow. |
 
-Spotted by Anushka on 2026-09-08.
+| 2 | Throughput stops improving past ~10 robots, and robots pile up in the bottom-right corner | the warehouse map in [shared/fleetx_core/grid.py](shared/fleetx_core/grid.py) | The four delivery bays are `DDDD` in a row on the BOTTOM EDGE (row 15), so they can only be entered from above — a dead-end pocket. Every order in the whole simulation targets one of those four squares. At 10+ robots they all converge there, and robots holding parcels cannot get in. **This is a warehouse LAYOUT limit, not a coordination bug.** Possible fixes, in order of honesty: (a) let a robot deliver to ANY free bay instead of one fixed bay, (b) queue outside the pocket instead of crowding it, (c) more bays, or bays with drive-through access from both sides. **FIXED 2026-09-08** — see the layout entry in the log. Two stations of two bays, 15 squares apart, each reachable from four sides. Throughput went from collapsing at scale to flat. |
+
+| 3 | 26 `__pycache__/*.pyc` files are committed to git | throughout | Python's compiled scratch files. They are rewritten every time the code runs, so `git status` shows fake changes constantly, they cause meaningless merge conflicts between teammates, and they are tied to Python 3.14 so they are useless to anyone on another version. Fix (Anushka's call, it is a git change): `git rm -r --cached '**/__pycache__'` then add `__pycache__/` and `*.pyc` to `.gitignore` — this one SHOULD go in `.gitignore` rather than `.git/info/exclude`, because every teammate needs it too, and there is nothing private about it. |
+
+Spotted by Anushka on 2026-09-08. Issues 2 and 3 found on 2026-09-08 during scaling tests.
 
 ---
 
@@ -154,6 +158,154 @@ _(Newest entry first.)_
   folder. Open the `.pptx` if you want to edit anything.
 - **Still to fill in:** Slide 1 says `<Team ID from SIH portal>` — replace it
   with the real Team ID before uploading.
+
+### 2026-09-08 — Layout fix: spread the packing stations (cleanup item 2)
+
+- **Teammate's idea, and it worked.** The four delivery bays used to sit in a
+  row ON the bottom wall — a dead-end pocket with one mouth. Now they are two
+  stations of two bays, 15 squares apart, each reachable from four sides:
+
+      row 12  ............................
+      row 13  PP...DD.............DD..CC..
+      row 14  PP......................CC..
+      row 15  ............................   <- the old pocket, now clear
+
+  **Still exactly four bays.** Capacity was deliberately held constant so any
+  improvement is provably about PLACEMENT, not about adding more doors. Pick
+  stations and chargers were left untouched at four each.
+
+- **The deeper flaw was not the map.** Every order named ONE specific delivery
+  square, so robots queued for it while the other bays stood empty. Now a robot
+  chooses its bay when it COLLECTS the parcel: nearest by road, with a penalty
+  for any bay another robot is on or heading to, and it will switch bay if it
+  gets stuck on the way. Worked out locally from what it has heard, like
+  everything else here — no dispatcher.
+
+- **RESULT — same four bays, just not in a corner:**
+
+      fleet | orders delivered        | % faster | collisions
+       size | before -> after         |          |
+      ------+-------------------------+----------+-----------
+          3 |  83.8  ->  96.6         |  76.8%   |     0
+          5 |  96.4  ->  97.8         |  82.0%   |     0
+         10 |  93.6  ->  97.6         |  85.9%   |     0
+         15 |  61.6  ->  97.2         |  87.0%   |     0
+         20 |  40.4  ->  95.6         |  86.6%   |     0
+
+  Throughput used to COLLAPSE 58% from 5 to 20 robots. It is now flat: 97.8
+  down to 95.6, a 2% drop across a 7x larger fleet.
+  Seconds per order: 4.1s at 3 robots, 4.2s at 20 — essentially constant.
+  Robots jammed at the end: was 8.8 of 20, now 0.4 of 20.
+
+- **What to claim now:** "Same four packing stations. We just stopped putting
+  them all in one dead end. Throughput went from collapsing at scale to flat
+  from 3 to 20 robots, with zero collisions throughout." The scaling caveat
+  from the previous entry is GONE.
+
+- **One number went DOWN and it is not a regression.** "% faster" at 3 robots
+  fell from 84.7% to 76.8%, because the BASELINE improved too (12.8 -> 22.4
+  orders). Spread-out bays help stop-and-wait as well. FLEET-X also improved
+  (83.8 -> 96.6). We are beating a stronger opponent, which is the more honest
+  comparison — say this if anyone notices the smaller percentage.
+
+- **Gates, all passed before anything was reported:**
+  - 235 of 235 tests pass, with ZERO modifications
+  - full collision suite A-E: 0 collisions, closest approach 1.000
+  - 50% packet loss: 0 collisions
+  - final table 3/5/10/15/20: 0 collisions at every size
+  - biggest single-tick move 0.1250 squares, exactly the wheel limit
+
+- **Predicted 16 test coordinate updates, needed ZERO.** The old bays are now
+  plain FLOOR and still walkable, so a test saying "deliver to (13,15)" tests
+  exactly what it did before — collect here, drive there, drop off. Delivering
+  to an exact square is still supported (`flexible=False`). The only test that
+  mentions DROP at all just checks stations of each kind exist somewhere, which
+  is still true. No assertion changed, no logic changed, nothing weakened.
+
+- **A mistake I caught in myself:** my first map edit also wiped a row of pick
+  stations and chargers as a side effect, which would have quietly changed two
+  other variables and made the experiment worthless. Reverted before measuring.
+
+- **Re-run it:** `python3 -u tools/final_table.py --seeds 5 --robots 3 5 10 15 20`
+  Raw data for all 50 runs in `final_table.csv`.
+
+---
+
+### 2026-09-08 — Phase 15b: THE FINAL TABLE (this is the one to trust)
+
+- **Every number here comes from ONE run of the current code**, so nothing on a
+  slide can have been measured on a different version. Produced by
+  `python3 -u tools/final_table.py`. Raw data for all 50 runs in
+  `final_table.csv`.
+
+      fleet |  collisions   |  orders delivered  | % faster
+       size |  S&W  FLEET-X |   S&W     FLEET-X  |
+      ------+---------------+--------------------+----------
+          3 |    0        0 |  12.8        83.8  |   84.7%
+          5 |    0        0 |  12.0        96.4  |   87.6%
+         10 |    0        0 |   6.0        93.6  |   93.6%
+         15 |    0        0 |   4.6        61.6  |   92.5%
+         20 |    0        0 |   4.8        40.4  |   88.1%
+
+      Collisions across every run:  FLEET-X 0, stop-and-wait 0
+      Closest two robots ever came: 1.000 squares (touching is under 0.7)
+      Biggest single-tick move:     0.1250 squares (wheels allow 0.125)
+
+  Seconds per order: 31.2 -> 4.8 (3 robots), 33.3 -> 4.1 (5), 66.7 -> 4.3 (10),
+  87.0 -> 6.5 (15), 83.3 -> 9.9 (20).
+
+- **WHAT TO CLAIM:** zero collisions at 3-20 robots; 84-94% faster than
+  stop-and-wait at every size; this warehouse runs best at 5-10 robots.
+
+- **WHAT NOT TO CLAIM:** "it scales to 20 robots". It does not. Throughput
+  FALLS from 96 orders at 5 robots to 40 at 20. The percentage stays high at 20
+  only because the baseline degrades even faster, so **the percentage is not the
+  scaling signal — orders delivered is.** Supporting evidence: 8.8 of 20 robots
+  jammed at the end on average, against 0.0 at 3-10 robots. That is cleanup
+  item 2, the four delivery bays in a dead-end pocket.
+
+- **Why this metric.** Both fleets get the same orders for the same 400s and we
+  count what was delivered; "% faster" is the drop in average seconds per
+  delivered order. The two alternatives were both worse:
+    * "time to finish the batch" — under load stop-and-wait never finishes, so
+      there would be no number at all.
+    * "average time per order as the fleets report it" — this one LIES. A
+      jammed fleet delivers the easy early orders while the floor is empty then
+      seizes up, so its own average covers only what it survived, and it can
+      look FASTER while doing a sixth of the work.
+  Counting output over a fixed clock has neither hole, and no run has to be
+  excluded — which was the weakness of the earlier 69.6%/80% figures.
+
+- **A CORRECTION I OWE THE RECORD.** Partway through I told Anushka FLEET-X was
+  "clean to 5 robots only" and that 10 robots collapsed to 24 orders. That was
+  WRONG — 10 robots delivers 93.6, as healthy as 5. I measured it on a build
+  that had the teleport fixed but not yet the reverse-gear fix, and stated a
+  conclusion from a half-finished state. She told me to hold off acting on it
+  and she was right.
+  **Rule taken from this: do not draw conclusions from a partially-fixed
+  build. Finish the fix, then measure.**
+
+- **Also fixed in this round (the 20-robot collision):**
+  1. **`consider_reroute` teleported robots.** It swapped the path while the
+     robot was part way along a segment, leaving progress untouched, so
+     "62% of the way west" became "62% of the way east" and the robot jumped
+     1.37 squares through another robot. Nothing predicts teleportation, which
+     is why the crash was also unpredicted. Now it plans from the square it is
+     committed to entering.
+  2. **The obstacle-replan had the same hole** and snapped robots backwards.
+  3. **Robots could not reverse.** Fixing 1 and 2 exposed a real deadlock
+     underneath: two robots each a fraction of a square into the SAME square
+     from opposite sides, both stopped, neither able to finish or get out of
+     the way. Teleporting had been hiding it. Real robots have reverse gear;
+     now these do too. This is what restored throughput at 10+ robots.
+  4. **A proper invariant test:** no robot may move further in one tick than
+     its wheels allow. All three collisions this project has ever had were
+     teleports — this catches the whole class at once instead of finding them
+     one crash at a time.
+
+- 235 of 235 tests pass. Full collision suite clean. Purity guard clean.
+
+---
 
 ### 2026-09-08 — Phase 15: THE BENCHMARK — 69.6% faster, 0 collisions
 

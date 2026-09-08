@@ -222,7 +222,9 @@ class OrderGenerator:
         dropoff = self._rng.choice(self.dropoffs)
         product = self._rng.choice(PRODUCTS)
         priority = self._rng.choice([5, 5, 5, 6, 7])
-        task = self.world.announce_task(pickup, dropoff, product, priority)
+        # flexible=True: "take it to a packing station", not "to THAT square".
+        task = self.world.announce_task(pickup, dropoff, product, priority,
+                                        flexible=True)
         return (f"ORDER {task.task_id}: {product} - collect ({pickup.x},{pickup.y}) "
                 f"deliver ({dropoff.x},{dropoff.y})")
 

@@ -315,6 +315,7 @@ class TaskAnnounce:
     dropoff: Tuple[int, int]
     product: str = ""
     priority: int = 5
+    flexible: bool = False       # any packing station will do
 
     type: str = field(default=MessageType.TASK_ANNOUNCE.value, init=False)
 
@@ -326,6 +327,7 @@ class TaskAnnounce:
             "pickup": [self.pickup[0], self.pickup[1]],
             "dropoff": [self.dropoff[0], self.dropoff[1]],
             "product": self.product, "priority": self.priority,
+            "flexible": self.flexible,
         }
 
 
@@ -440,7 +442,7 @@ def from_dict(data: Dict[str, Any]):
             robot_id=data["robot_id"], timestamp=data["timestamp"], seq=data["seq"],
             task_id=data["task_id"], pickup=tuple(data["pickup"]),
             dropoff=tuple(data["dropoff"]), product=data.get("product", ""),
-            priority=data.get("priority", 5),
+            priority=data.get("priority", 5), flexible=data.get("flexible", False),
         )
     if kind == MessageType.TASK_BID.value:
         return TaskBid(

@@ -26,7 +26,7 @@ from .conflicts import (DEFAULT_CLEARANCE, DEFAULT_HORIZON, Conflict, Plan,
                         build_plan, find_conflicts)
 from .deadlock import STUCK_SECONDS, WaitForGraph, Waiting, choose_victim
 from .fleet_view import FleetView
-from .grid import Cell, Grid
+from .grid import Cell, CellKind, Grid
 from .messages import (BlockedAisle, ConflictAlert, Heartbeat, IntentUpdate,
                        PathReservation, PoseUpdate, TaskAnnounce, TaskBid,
                        TaskClaim, WaitReport, YieldRequest)
@@ -131,6 +131,8 @@ class Robot:
     _make_way_for: Optional[tuple] = None
     _pending_ask: Optional[tuple] = None
     _saw_rng: object = None         # backoff randomness, seeded per robot
+    _still_for: float = 0.0         # seconds spent going nowhere, see stalled_for
+    _reversing: bool = False        # backing out of a segment it cannot finish
 
     # --- things that should not be there (Phase 8) ---
     blocked_map: Optional[BlockedMap] = None
@@ -236,12 +238,19 @@ class Robot:
             self._progress = 0.0
             return
 
-        # Something has appeared on the route we were following. Tear it up.
+        # Something has appeared on the route we were following. Tear it up --
+        # but never mid-segment, or the robot snaps back onto the square behind
+        # it. If it has set off, it finishes that step and replans on arrival.
+        # (The safety layer emergency-stops it if the square it is entering is
+        # the blocked one.)
         if self.path:
             in_the_way = self.blocked_map.blocks_any(self.path, now)
             if in_the_way is not None:
-                self.path = []
-                self._progress = 0.0
+                if self._progress > 0.0:
+                    self.path = [self.path[0]]
+                else:
+                    self.path = []
+                    self._progress = 0.0
                 self.status = RobotStatus.REROUTING
                 self._reroute_at = now
 
@@ -278,6 +287,34 @@ class Robot:
         ONLY the grid simulator calls this. On a real robot Nav2 turns the
         wheels and update_pose() is used instead.
         """
+        before = (self.cell, self.x, self.y)
+        self._advance(dt)
+        if self.goal is None or before != (self.cell, self.x, self.y):
+            self._still_for = 0.0
+        else:
+            self._still_for += dt
+
+    def _advance(self, dt: float) -> None:
+        """The driving itself."""
+        if self._reversing:
+            # Backing up the way we came. Real robots have reverse gear, and
+            # without it two robots part way into the same square from opposite
+            # sides are wedged there for ever -- neither can go on, and neither
+            # can get out of the way.
+            self._progress -= self.speed * dt
+            if self._progress <= 0.0:
+                self._progress = 0.0
+                self._reversing = False
+                self.path = []              # plan afresh from where we are
+                self.x = float(self.cell.x)
+                self.y = float(self.cell.y)
+            elif self.path:
+                nxt = self.path[0]
+                self.x = self.cell.x + (nxt.x - self.cell.x) * self._progress
+                self.y = self.cell.y + (nxt.y - self.cell.y) * self._progress
+            self._drain_battery(dt, moving=True)
+            return
+
         if self.hold and self.emergency:
             # EMERGENCY STOP. Something is in the space ahead, so stop dead --
             # even part way down an aisle. 05_PATH_PLANNING section 12: "the
@@ -966,9 +1003,47 @@ class Robot:
             if self.status is RobotStatus.WAITING and self.path:
                 self.status = RobotStatus.MOVING
 
+    BACK_OUT_AFTER = 3.0        # wedged this long mid-segment, so reverse
+
+    def back_out_if_wedged(self, now: float) -> Optional[str]:
+        """Part way into a square it cannot enter, and going nowhere.
+
+        Two robots can each commit to the same square from opposite ends, stop
+        dead a fraction of a square in, and then neither can finish nor get out
+        of the way. The only move left is the one a real robot has and this one
+        did not: reverse back onto the square it came from.
+        """
+        if self._reversing:
+            return None
+        if not (self.hold and self.emergency):
+            return None
+        if self._progress <= 0.0:
+            return None                 # standing on a square, nothing to back out of
+        if self.stalled_for(now) < self.BACK_OUT_AFTER:
+            return None
+
+        self._reversing = True
+        self._suspended_goal = self._suspended_goal or self.goal
+        return (f"{self.robot_id} was wedged part way into "
+                f"({self.path[0].x}, {self.path[0].y}) - backing out")
+
     def waited_for(self, now: float) -> float:
-        """How long this robot has been stuck right now."""
+        """How long this robot has been HELD right now."""
         return 0.0 if self.waiting_since is None else max(0.0, now - self.waiting_since)
+
+    def stalled_for(self, now: float) -> float:
+        """How long it has been going nowhere, whatever it has been doing.
+
+        This is not the same as being held. A robot that keeps rerouting is
+        busy, not blocked -- so its "held" timer keeps resetting, and it can
+        shuffle about fruitlessly for ever without ever looking stuck.
+
+        That actually happened: a robot sat outside the packing station for
+        800 seconds, replanning the whole time, reporting 0.0s stuck, and the
+        deadlock recovery never fired because it never looked jammed. Measuring
+        actual progress closes that hole.
+        """
+        return 0.0 if self.goal is None else self._still_for
 
     # ------------------------------------- giving way properly (Phase 6)
 
@@ -1032,21 +1107,41 @@ class Robot:
         # Those are near-impassable, not merely expensive.
         occupied = [Cell(n.cell[0], n.cell[1]) for n in self.fleet.fresh(now)]
 
+        # If it is already part way along a segment it is COMMITTED to reaching
+        # that square -- a real robot cannot jump back onto the one behind it.
+        # So plan the new route FROM there, not from the square it has left.
+        #
+        # Getting this wrong teleported a robot 1.37 squares sideways in a
+        # single tick, straight through another robot. Nothing predicts
+        # teleportation, so the crash was not seen coming either.
+        committed = self.path[0] if (self._progress > 0.0 and self.path) else None
+        start = committed if committed is not None else self.cell
+
         cost_fn = avoidance_cost(
             self.table, self.robot_id, now,
             avoid_robot=self.blocked_by, occupied=occupied,
         )
-        alternative = find_path(grid, self.cell, self.goal, cost_fn,
+        alternative = find_path(grid, start, self.goal, cost_fn,
                                 blocked=self.blocked_map.cells(now))
 
         if alternative is None or len(alternative) < 2:
             self.last_decision = f"{self.robot_id} waits - no way round"
             return False
 
-        new_path = alternative[1:]
+        # When committed, the square we are entering stays the first step, so
+        # progress along it still means what it did a moment ago.
+        new_path = list(alternative) if committed is not None else alternative[1:]
 
-        # Same first step means it is the same plan; nothing gained.
-        if new_path[0] == self.path[0]:
+        # Has anything actually changed about where we go NEXT? If the first
+        # free step is the same, this is the same plan wearing a hat: the robot
+        # would walk back into the same jam, having burnt its cooldown.
+        #
+        # When committed, the first step is fixed (we are already crossing to
+        # it), so the step that matters is the one after it.
+        skip = 1 if committed is not None else 0
+        mine = self.path[skip] if len(self.path) > skip else None
+        theirs = new_path[skip] if len(new_path) > skip else None
+        if mine == theirs:
             self.last_decision = f"{self.robot_id} waits - every route goes the same way"
             return False
 
@@ -1074,6 +1169,53 @@ class Robot:
         self.waiting_since = None
         return True
 
+    # ----------------------------- getting out of the way when idle
+
+    def vacate_station(self, grid: Grid, now: float) -> Optional[str]:
+        """Finished, with nothing to do? Then do not stand on a station.
+
+        A robot that finishes a delivery simply stops -- on the delivery bay.
+        With three robots there is usually room. With five, four idle robots
+        end up parked on and around the four packing squares and a robot
+        carrying the last parcel physically cannot get in. That is exactly how
+        a 20-order batch ended at 19/20.
+
+        Real warehouses do not let robots idle in the pick face either. So an
+        idle robot steps off onto ordinary floor and waits there.
+        """
+        if self.task is not None or self.goal is not None:
+            return None
+        if self.status not in (RobotStatus.IDLE, RobotStatus.CHARGING):
+            return None
+        if grid.kind(self.cell) is CellKind.FLOOR:
+            return None                       # already out of the way
+
+        spot = self._nearest_parking(grid, now)
+        if spot is None:
+            return None
+        self.set_goal(spot)
+        return (f"{self.robot_id} cleared the station at "
+                f"({self.cell.x}, {self.cell.y}) -> ({spot.x}, {spot.y})")
+
+    def _nearest_parking(self, grid: Grid, now: float) -> Optional[Cell]:
+        """Closest ordinary floor square with nobody on it."""
+        taken = {Cell(n.cell[0], n.cell[1]) for n in self.fleet.fresh(now)}
+        blocked = self.blocked_map.cells(now)
+        seen = {self.cell}
+        queue = [self.cell]
+        while queue:
+            cell = queue.pop(0)
+            for nxt in grid.neighbours(cell):
+                if nxt in seen or nxt in blocked:
+                    continue
+                seen.add(nxt)
+                if grid.kind(nxt) is CellKind.FLOOR and nxt not in taken:
+                    return nxt
+                queue.append(nxt)
+            if len(seen) > 60:
+                break                          # do not search the whole warehouse
+        return None
+
     # ------------------------------------- real jobs (Phase 9)
 
     def _ingest_task_news(self, message, now: float) -> None:
@@ -1086,7 +1228,7 @@ class Robot:
                     pickup=Cell(*message.pickup), dropoff=Cell(*message.dropoff),
                     product=message.product, priority=message.priority,
                     created_at=now, announced_at=now,
-                    status=TaskStatus.ANNOUNCED,
+                    status=TaskStatus.ANNOUNCED, flexible=message.flexible,
                 ))
             elif task.status is TaskStatus.QUEUED:
                 task.status = TaskStatus.ANNOUNCED
@@ -1212,6 +1354,48 @@ class Robot:
             break                              # one job at a time
         return notes
 
+    # How much a bay is penalised for each robot already on it or heading to
+    # it. Big enough that a slightly further EMPTY bay beats a nearer busy one.
+    BAY_BUSY_PENALTY = 8.0
+    REPICK_BAY_AFTER = 6.0      # stuck this long heading for a bay, try another
+
+    def choose_dropoff(self, task: Task, grid: Grid, now: float) -> Optional[Cell]:
+        """Which packing station to take this parcel to.
+
+        Only for flexible jobs. Nearest by road, but a bay somebody else is
+        using or heading for costs extra -- otherwise every robot picks the
+        same nearest bay and they queue for it while the others stand empty.
+
+        Worked out locally from what this robot has heard, like everything
+        else here. No dispatcher.
+        """
+        if not task.flexible:
+            return task.dropoff
+        bays = grid.cells_of_kind(CellKind.DROP)
+        if not bays:
+            return task.dropoff
+
+        busy: Dict[Cell, int] = {}
+        for note in self.fleet.fresh(now):
+            here = Cell(note.cell[0], note.cell[1])
+            if here in bays:
+                busy[here] = busy.get(here, 0) + 1
+            if note.destination:
+                heading = Cell(note.destination[0], note.destination[1])
+                if heading in bays:
+                    busy[heading] = busy.get(heading, 0) + 1
+
+        blocked = self.blocked_map.cells(now)
+        best, best_cost = None, float("inf")
+        for bay in bays:
+            route = find_path(grid, self.cell, bay, blocked=blocked)
+            if route is None:
+                continue
+            cost = (len(route) - 1) + self.BAY_BUSY_PENALTY * busy.get(bay, 0)
+            if cost < best_cost:
+                best, best_cost = bay, cost
+        return best if best is not None else task.dropoff
+
     def cost_of(self, task: Task, grid: Grid, now: float) -> Optional[float]:
         """What this job would cost us. None if we simply cannot reach it."""
         blocked = self.blocked_map.cells(now)
@@ -1254,6 +1438,9 @@ class Robot:
             if self.cell == task.pickup and self._progress == 0.0:
                 task.status = TaskStatus.CARRYING
                 task.picked_at = now
+                chosen = self.choose_dropoff(task, grid, now)
+                if chosen is not None:
+                    task.dropoff = chosen
                 self.set_goal(task.dropoff)
                 notes.append(f"{self.robot_id} collected {task.task_id} "
                              f"at ({task.pickup.x}, {task.pickup.y})")
@@ -1281,6 +1468,15 @@ class Robot:
             elif (self.goal is None and self.status is not RobotStatus.BLOCKED
                   and self._suspended_goal is None):
                 self.set_goal(task.dropoff)
+            elif task.flexible and self.stalled_for(now) > self.REPICK_BAY_AFTER:
+                # Stuck on the way to a bay. Try a different one -- exactly the
+                # same idea as rerouting, one level up.
+                chosen = self.choose_dropoff(task, grid, now)
+                if chosen is not None and chosen != task.dropoff:
+                    notes.append(f"{self.robot_id} switching to the packing "
+                                 f"station at ({chosen.x}, {chosen.y})")
+                    task.dropoff = chosen
+                    self.set_goal(chosen)
 
         return notes
 
@@ -1372,7 +1568,8 @@ class Robot:
           * we are in a CIRCULE of robots each waiting for the next. Somebody
             has to give up, chosen so that everyone picks the same one.
         """
-        if self.blocked_by is None or self.waited_for(now) < STUCK_SECONDS:
+        stuck = max(self.waited_for(now), self.stalled_for(now))
+        if self.blocked_by is None or stuck < STUCK_SECONDS:
             return None
         blocker = self.blocked_by
 
@@ -1385,14 +1582,14 @@ class Robot:
         # simple two-robot standoff is invisible.
         self.waits.add(Waiting(
             robot_id=self.robot_id, blocked_by=blocker,
-            since=self.waited_for(now), priority=self.priority, is_moving=False,
+            since=stuck, priority=self.priority, is_moving=False,
         ))
         cycle = self.waits.cycle_containing(self.robot_id)
         if cycle:
             members = []
             for rid in cycle:
                 if rid == self.robot_id:
-                    members.append((rid, self.priority, self.waited_for(now)))
+                    members.append((rid, self.priority, stuck))
                 else:
                     info = self.waits.info(rid)
                     members.append((rid, info.priority if info else BASE_PRIORITY,

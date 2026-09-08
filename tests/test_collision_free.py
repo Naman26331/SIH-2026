@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(ROOT, "shared"))
 sys.path.insert(0, os.path.join(ROOT, "grid_sim"))
 
 from fleetx_core import (Cell, InMemoryBus, Robot, RobotStatus, World,
-                         phase2_world, yields_to)
+                         fleet_world, phase2_world, yields_to)
 from fleetx_core.grid import CellKind
 from scenarios import Scenarios
 
@@ -65,6 +65,76 @@ class TestTheYieldingRule(unittest.TestCase):
 
 
 class TestNoTeleporting(unittest.TestCase):
+    """A robot may never move further in one tick than its wheels allow.
+
+    This is THE invariant. All three collisions this project has had were
+    teleports: a robot jumped across a gap and through another robot, and
+    nothing predicted it because nothing predicts teleportation. Checking
+    positions every tick catches the whole class in one test, instead of
+    finding them one crash at a time.
+    """
+
+    def _assert_no_jumps(self, world, sc, ticks, label):
+        for _ in range(ticks):
+            before = {r.robot_id: (r.x, r.y) for r in world.robots.values()}
+            if sc:
+                sc.keep_busy()
+            world.tick(0.05)
+            for r in world.robots.values():
+                px, py = before[r.robot_id]
+                moved = ((r.x - px) ** 2 + (r.y - py) ** 2) ** 0.5
+                limit = r.speed * 0.05 + 1e-9
+                self.assertLessEqual(
+                    moved, limit,
+                    f"{label}: {r.robot_id} moved {moved:.3f} squares in one tick "
+                    f"at t={world.sim_time:.2f} (wheels allow {limit:.3f})")
+
+    def test_no_robot_ever_jumps_while_running_orders(self):
+        for robots in (3, 10, 20):
+            w = fleet_world(robots)
+            sc = Scenarios(w)
+            sc.apply("orders", seed=7, every=4.0, limit=None)
+            self._assert_no_jumps(w, sc, 2000, f"{robots} robots")
+
+    def test_no_robot_ever_jumps_while_being_sent_about(self):
+        rng = random.Random(11)
+        w = phase2_world()
+        sc = Scenarios(w)
+        sc.apply("patrol")
+        floor = w.grid.cells_of_kind(CellKind.FLOOR)
+        for _ in range(2000):
+            if rng.random() < 0.04:
+                w.get(rng.choice(list(w.robots))).set_goal(rng.choice(floor))
+            before = {r.robot_id: (r.x, r.y) for r in w.robots.values()}
+            sc.keep_busy()
+            w.tick(0.05)
+            for r in w.robots.values():
+                px, py = before[r.robot_id]
+                moved = ((r.x - px) ** 2 + (r.y - py) ** 2) ** 0.5
+                self.assertLessEqual(moved, r.speed * 0.05 + 1e-9,
+                                     f"{r.robot_id} jumped at t={w.sim_time:.2f}")
+
+    def test_no_robot_ever_jumps_with_obstacles_appearing(self):
+        rng = random.Random(12)
+        w = fleet_world(5)
+        sc = Scenarios(w)
+        sc.apply("orders", seed=3, every=4.0, limit=None)
+        floor = w.grid.cells_of_kind(CellKind.FLOOR)
+        for _ in range(2000):
+            if rng.random() < 0.01:
+                w.add_obstacle(rng.choice(floor))
+            if rng.random() < 0.005:
+                w.clear_obstacles()
+            before = {r.robot_id: (r.x, r.y) for r in w.robots.values()}
+            sc.keep_busy()
+            w.tick(0.05)
+            for r in w.robots.values():
+                px, py = before[r.robot_id]
+                moved = ((r.x - px) ** 2 + (r.y - py) ** 2) ** 0.5
+                self.assertLessEqual(moved, r.speed * 0.05 + 1e-9,
+                                     f"{r.robot_id} jumped at t={w.sim_time:.2f}")
+
+
     def test_changing_destination_mid_move_does_not_jump_backwards(self):
         """A robot part way along a segment cannot be snapped back onto the
         square behind it -- that jumped it straight through safety checks."""

@@ -157,6 +157,16 @@ class World:
             robot.communicate(self.bus, self.sim_time)
 
         # Phase 9: bid for jobs, claim what we win, get on with them.
+        # Phase 9b: an idle robot must not sit on a pick or drop station.
+        for robot in self.robots.values():
+            note = robot.vacate_station(self.grid, self.sim_time)
+            if note:
+                self.decisions.append({
+                    "sim_time": round(self.sim_time, 2),
+                    "robot_id": robot.robot_id, "text": note,
+                })
+                del self.decisions[:-20]
+
         for robot in self.robots.values():
             for note in robot.work_on_tasks(self.grid, self.bus, self.sim_time):
                 self.decisions.append({
@@ -183,6 +193,14 @@ class World:
             for robot in self.robots.values():
                 robot.stop_and_wait_check(self.sim_time, dt)
             for robot in self.robots.values():
+                note = robot.back_out_if_wedged(self.sim_time)
+                if note:
+                    self.decisions.append({
+                        "sim_time": round(self.sim_time, 2),
+                        "robot_id": robot.robot_id, "text": note,
+                    })
+                    del self.decisions[:-20]
+            for robot in self.robots.values():
                 note = robot.resume_after_yielding(self.sim_time)
                 if note is None:
                     note = robot.stop_and_wait_backoff(self.grid, self.sim_time)
@@ -202,6 +220,14 @@ class World:
                 robot.reserve_ahead(self.bus, self.sim_time)
             for robot in self.robots.values():
                 robot.check_clearance(self.sim_time, dt)
+            for robot in self.robots.values():
+                note = robot.back_out_if_wedged(self.sim_time)
+                if note:
+                    self.decisions.append({
+                        "sim_time": round(self.sim_time, 2),
+                        "robot_id": robot.robot_id, "text": note,
+                    })
+                    del self.decisions[:-20]
             # Phase 6: anyone held up decides whether to wait or go around.
             if self.negotiation_enabled:
                 for robot in self.robots.values():
@@ -256,21 +282,21 @@ class World:
     # -------------------------------------------- real jobs (Phase 9)
 
     def announce_task(self, pickup: Cell, dropoff: Cell, product: str = "",
-                      priority: int = 5) -> Task:
+                      priority: int = 5, flexible: bool = False) -> Task:
         """Put a new job on the air. Nobody is told who should do it."""
         self._task_seq += 1
         task = Task(
             task_id=f"T-{self._task_seq:03d}",
             pickup=pickup, dropoff=dropoff, product=product, priority=priority,
             created_at=self.sim_time, announced_at=self.sim_time,
-            status=TaskStatus.ANNOUNCED,
+            status=TaskStatus.ANNOUNCED, flexible=flexible,
         )
         self.board.add(task)
         self.bus.publish(TaskAnnounce(
             robot_id="ORDERS", timestamp=self.sim_time, seq=self._task_seq,
             task_id=task.task_id,
             pickup=(pickup.x, pickup.y), dropoff=(dropoff.x, dropoff.y),
-            product=product, priority=priority,
+            product=product, priority=priority, flexible=flexible,
         ))
         return task
 
@@ -451,12 +477,17 @@ class World:
         Phases 6 and 7 are actually for.
         """
         for robot in self.robots.values():
-            stuck = robot.waited_for(self.sim_time)
+            # Either measure counts. A robot that keeps rerouting is not
+            # "waiting", but if it has gone nowhere for ages it is still jammed
+            # -- and the dashboard used to report 0 deadlocks while a robot sat
+            # outside the packing station for 800 seconds.
+            stuck = max(robot.waited_for(self.sim_time),
+                        robot.stalled_for(self.sim_time))
             if stuck >= self.deadlock_after:
                 if robot.robot_id not in self._deadlocked:
                     self._deadlocked.add(robot.robot_id)
                     self.deadlocks_seen += 1
-            elif robot.waiting_since is None:
+            elif robot.waiting_since is None and robot.stalled_for(self.sim_time) < 1.0:
                 self._deadlocked.discard(robot.robot_id)
 
     def stuck_robots(self) -> List[str]:

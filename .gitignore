@@ -1,0 +1,11 @@
+# Python's compiled scratch files.
+#
+# These are rewritten every time the code runs, so without this they show up as
+# changes constantly and cause merge conflicts between teammates that mean
+# nothing. They are also tied to one Python version, so they are useless to
+# anybody on a different one.
+#
+# This rule belongs here rather than in .git/info/exclude because every
+# teammate needs it, and there is nothing confidential about a .pyc file.
+__pycache__/
+*.pyc
