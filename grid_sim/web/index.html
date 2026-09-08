@@ -1,0 +1,1376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FLEET-X Control Center</title>
+<style>
+  :root{
+    --bg:#0A0E13; --panel:#10161F; --panel-2:#141C27; --border:#1E2937;
+    --text:#E4ECF4; --muted:#7A8899; --dim:#4A5768;
+    --cyan:#22D3EE; --green:#34D399; --amber:#F5B841; --red:#F87171; --violet:#A78BFA;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .app{display:flex; flex-direction:column; height:100vh; min-height:0}
+
+  /* ---------- top bar ---------- */
+  header{
+    display:flex; align-items:center; gap:16px; padding:12px 20px;
+    background:var(--panel); border-bottom:1px solid var(--border); flex:none;
+  }
+  .brand{font-weight:700; letter-spacing:.14em; font-size:13px}
+  .brand span{color:var(--cyan)}
+  .sub{color:var(--muted); font-size:11px; letter-spacing:.06em; text-transform:uppercase}
+  .live{
+    margin-left:auto; display:flex; align-items:center; gap:7px;
+    font-size:11px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted);
+    font-family:var(--mono);
+  }
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--dim)}
+  .live.on .dot{background:var(--green); box-shadow:0 0 0 3px rgba(52,211,153,.15); animation:pulse 2s infinite}
+  .live.on{color:var(--green)}
+  .live.off .dot{background:var(--red)} .live.off{color:var(--red)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+
+  /* ---------- warning banner ---------- */
+  .warn{
+    flex:none; background:rgba(248,113,113,.10); border-bottom:1px solid rgba(248,113,113,.25);
+    color:#FCA5A5; font-size:12px; padding:7px 20px; display:flex; gap:9px; align-items:center;
+  }
+  .warn b{color:var(--red)}
+
+  /* ---------- KPI strip ---------- */
+  .kpis{
+    display:flex; gap:1px; background:var(--border);
+    border-bottom:1px solid var(--border); flex:none; overflow-x:auto;
+  }
+  .kpi{background:var(--panel); padding:10px 18px; min-width:100px; flex:1; transition:background .3s}
+  .kpi .k{font-size:10px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted)}
+  .kpi .v{font-family:var(--mono); font-size:20px; font-weight:600; margin-top:2px}
+  .kpi .v.good{color:var(--green)} .kpi .v.warn{color:var(--amber)} .kpi .v.bad{color:var(--red)}
+  .kpi.hit{background:rgba(248,113,113,.16)}
+
+  /* ---------- body ---------- */
+  main{display:flex; flex:1; min-height:0}
+  .mapwrap{
+    flex:1; min-width:0; position:relative; display:flex;
+    align-items:center; justify-content:center; padding:18px; background:var(--bg);
+  }
+  canvas{display:block; border-radius:6px; cursor:crosshair; touch-action:none}
+  .hint{
+    position:absolute; left:50%; bottom:10px; transform:translateX(-50%);
+    background:rgba(16,22,31,.94); border:1px solid var(--border); border-radius:20px;
+    padding:6px 15px; font-size:12px; color:var(--muted); white-space:nowrap;
+    pointer-events:none; transition:opacity .3s; max-width:92%; overflow:hidden; text-overflow:ellipsis;
+  }
+  .hint b{font-weight:600}
+
+  /* ---------- side panel ---------- */
+  aside{
+    width:300px; flex:none; background:var(--panel); border-left:1px solid var(--border);
+    display:flex; flex-direction:column; overflow-y:auto;
+  }
+  .sec{padding:14px 16px; border-bottom:1px solid var(--border)}
+  .sec h2{
+    margin:0 0 10px; font-size:10px; letter-spacing:.12em; text-transform:uppercase;
+    color:var(--muted); font-weight:600; display:flex; align-items:center; gap:8px;
+  }
+  .sec h2 em{font-style:normal; color:var(--dim); text-transform:none; letter-spacing:0; font-size:11px}
+
+  .robot{
+    background:var(--panel-2); border:1px solid var(--border); border-radius:6px;
+    padding:10px 11px; margin-bottom:7px; cursor:pointer; transition:.14s;
+    border-left:3px solid var(--dim);
+  }
+  .robot:hover{background:#18212D}
+  .robot.sel{background:#18212D}
+  .robot .row1{display:flex; align-items:center; gap:9px}
+  .rid{font-family:var(--mono); font-weight:700; font-size:14px}
+  .pick{margin-left:auto; font-size:9px; letter-spacing:.1em; color:var(--dim); text-transform:uppercase}
+  .robot.sel .pick{color:var(--green)}
+  .badge{
+    font-family:var(--mono); font-size:10px; letter-spacing:.06em;
+    padding:2px 7px; border-radius:4px; background:#1D2836; color:var(--muted);
+  }
+  .badge.MOVING{background:rgba(34,211,238,.13); color:var(--cyan)}
+  .badge.IDLE{background:rgba(122,136,153,.13); color:var(--muted)}
+  .badge.BLOCKED{background:rgba(248,113,113,.14); color:var(--red)}
+
+  .bar{height:3px; background:#1D2836; border-radius:2px; margin:9px 0 7px; overflow:hidden}
+  .bar i{display:block; height:100%; background:var(--green); border-radius:2px; transition:width .3s}
+  .bar i.warn{background:var(--amber)} .bar i.bad{background:var(--red)}
+  .stats{display:grid; grid-template-columns:1fr 1fr; gap:3px 10px; font-size:11px}
+  .stats div{display:flex; justify-content:space-between}
+  .stats span:first-child{color:var(--muted)}
+  .stats span:last-child{font-family:var(--mono)}
+
+  .btns{display:grid; grid-template-columns:1fr 1fr; gap:7px}
+  button{
+    font:inherit; font-size:12px; color:var(--text); background:var(--panel-2);
+    border:1px solid var(--border); border-radius:5px; padding:8px 6px; cursor:pointer; transition:.14s;
+  }
+  button:hover{background:#1B2431; border-color:var(--cyan); color:var(--cyan)}
+  button:active{transform:translateY(1px)}
+  button.on{border-color:var(--cyan); color:var(--cyan); background:rgba(34,211,238,.10)}
+  button.wide{grid-column:1 / -1}
+
+  .legend{display:flex; flex-direction:column; gap:6px; font-size:12px}
+  .legend div{display:flex; align-items:center; gap:9px; color:var(--muted)}
+  .sw{width:12px;height:12px;border-radius:3px;flex:none;border:1px solid rgba(255,255,255,.07)}
+
+  .log{font-family:var(--mono); font-size:11px; display:flex; flex-direction:column; gap:4px}
+  .log div{color:var(--muted); display:flex; gap:7px; line-height:1.45}
+  .log time{color:var(--dim); flex:none}
+  .log div.crash span{color:var(--red)}
+  .log.empty{color:var(--dim)}
+
+  /* ---------- Phase 9: real jobs ---------- */
+  .badge.FAILED{background:rgba(248,113,113,.2); color:var(--red)}
+  .tasks{font-family:var(--mono); font-size:10.5px; display:flex; flex-direction:column; gap:3px}
+  .tasks div.row{display:flex; gap:6px; color:var(--muted); align-items:baseline}
+  .tasks .tid{flex:none; width:40px; font-weight:700; color:var(--text)}
+  .tasks .leg{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis}
+  .tasks .who{flex:none; width:22px; font-weight:700}
+  .tasks .st{flex:none; width:56px; font-size:9px; letter-spacing:.05em}
+  .tasks .DONE{opacity:.45}
+  .tasks .DONE .st{color:var(--green)}
+  .tasks .CARRYING .st{color:var(--cyan)}
+  .tasks .ASSIGNED .st{color:var(--amber)}
+  .tasks .ANNOUNCED .st{color:var(--violet)}
+  .tasks .none{color:var(--dim)}
+  .power{display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-top:7px}
+  .power button{font-size:11px; padding:6px 4px}
+  .power button.dead{border-color:var(--red); color:var(--red); background:rgba(248,113,113,.10)}
+  .log div.order span{color:var(--cyan)}
+  .log div.task span{color:var(--green)}
+
+  /* ---------- Phase 8: obstacles ---------- */
+  .badge.BLOCKED{background:rgba(248,113,113,.16); color:var(--red)}
+  .mode{
+    display:flex; align-items:center; gap:9px; font-size:12px; cursor:pointer;
+    background:var(--panel-2); border:1px solid var(--border); border-radius:5px;
+    padding:8px 10px; transition:.14s; margin-bottom:7px;
+  }
+  .mode:hover{background:#1B2431}
+  .mode.on{border-color:var(--red); background:rgba(248,113,113,.10); color:#FCA5A5}
+  .mode .st{margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--dim)}
+  .mode.on .st{color:var(--red)}
+  .blocks{font-family:var(--mono); font-size:10.5px; display:flex; flex-direction:column; gap:3px}
+  .blocks div{display:flex; gap:6px; color:var(--muted)}
+  .blocks .none{color:var(--dim)}
+  .log div.found span{color:var(--red)}
+
+  /* ---------- Phase 7: breaking jams ---------- */
+  .badge.YIELDING{background:rgba(52,211,153,.16); color:var(--green)}
+  .waitg{font-family:var(--mono); font-size:10.5px; display:flex; flex-direction:column; gap:3px}
+  .waitg div{display:flex; gap:6px; color:var(--muted)}
+  .waitg .none{color:var(--dim)}
+  .waitg b{font-weight:700}
+  .log div.jam span{color:var(--green)}
+
+  /* ---------- Phase 6: negotiation ---------- */
+  .badge.REROUTING{background:rgba(167,139,250,.16); color:var(--violet)}
+  .prio{font-family:var(--mono); font-size:10px; color:var(--muted)}
+  .prio b{color:var(--text)}
+  .prio .up{color:var(--green)}
+  .decisions{font-family:var(--mono); font-size:10.5px; display:flex; flex-direction:column; gap:4px}
+  .decisions div{color:var(--muted); display:flex; gap:7px; line-height:1.45}
+  .decisions time{color:var(--dim); flex:none}
+  .decisions .none{color:var(--dim)}
+  .log div.gave span{color:var(--violet)}
+
+  /* ---------- Phase 5: reservations ---------- */
+  .rtable{font-family:var(--mono); font-size:10.5px; display:flex; flex-direction:column; gap:2px}
+  .rtable .hd{color:var(--dim); letter-spacing:.06em; padding-bottom:3px; border-bottom:1px solid var(--border); margin-bottom:3px}
+  .rtable div{display:flex; gap:6px; color:var(--muted)}
+  .rtable .w{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis}
+  .rtable .t{flex:none; width:76px; color:var(--dim)}
+  .rtable .o{flex:none; width:22px; font-weight:700}
+  .rtable .g{flex:none; width:12px; text-align:center}
+  .rtable .no .g{color:var(--red)}
+  .rtable .no .w{color:var(--dim); text-decoration:line-through}
+  .badge.WAITING{background:rgba(245,184,65,.15); color:var(--amber)}
+  .stuck{
+    display:flex; gap:8px; align-items:center; margin-top:8px; padding:7px 10px;
+    background:rgba(248,113,113,.09); border:1px solid rgba(248,113,113,.3);
+    border-radius:5px; font-size:11px; color:#FCA5A5;
+  }
+  .stuck b{color:var(--red); font-family:var(--mono)}
+
+  /* ---------- Phase 4: conflicts ---------- */
+  .conf{
+    display:flex; align-items:center; gap:8px; font-family:var(--mono); font-size:11px;
+    background:rgba(245,184,65,.07); border:1px solid rgba(245,184,65,.25);
+    border-left:3px solid var(--amber); border-radius:5px; padding:7px 9px; margin-bottom:6px;
+  }
+  .conf.soon{background:rgba(248,113,113,.09); border-color:rgba(248,113,113,.35); border-left-color:var(--red)}
+  .conf .pair{font-weight:700}
+  .conf .where{color:var(--muted)}
+  .conf .cd{margin-left:auto; font-weight:700; color:var(--amber)}
+  .conf.soon .cd{color:var(--red)}
+  .conf .kind{font-size:9px; letter-spacing:.06em; color:var(--dim)}
+  .noconf{color:var(--dim); font-family:var(--mono); font-size:11px}
+
+  .log div.pred span{color:var(--amber)}
+
+  /* ---------- Phase 3: comms ---------- */
+  .toggles{display:flex; flex-direction:column; gap:6px}
+  .tog{
+    display:flex; align-items:center; gap:9px; font-size:12px;
+    background:var(--panel-2); border:1px solid var(--border); border-radius:5px;
+    padding:7px 10px; cursor:pointer; transition:.14s;
+  }
+  .tog:hover{background:#1B2431}
+  .tog .rid2{font-family:var(--mono); font-weight:700; font-size:12px}
+  .tog .st{margin-left:auto; font-family:var(--mono); font-size:10px; color:var(--dim)}
+  .tog.mute{border-color:rgba(248,113,113,.4); background:rgba(248,113,113,.07)}
+  .tog.mute .st{color:var(--red)}
+
+  .slider{display:flex; align-items:center; gap:10px; margin-top:9px}
+  .slider label{font-size:11px; color:var(--muted); white-space:nowrap}
+  .slider input{flex:1; accent-color:var(--cyan)}
+  .slider .val{font-family:var(--mono); font-size:11px; color:var(--cyan); min-width:34px; text-align:right}
+
+  .sees{display:flex; flex-wrap:wrap; gap:5px; margin-top:8px}
+  .see{
+    font-family:var(--mono); font-size:10px; padding:2px 7px; border-radius:4px;
+    background:#1D2836; color:var(--muted); border:1px solid transparent;
+  }
+  .see.ok{color:var(--green); border-color:rgba(52,211,153,.3)}
+  .see.stale{color:var(--red); border-color:rgba(248,113,113,.35); background:rgba(248,113,113,.10)}
+
+  .msgs{font-family:var(--mono); font-size:10.5px; display:flex; flex-direction:column; gap:3px}
+  .msgs div{display:flex; gap:6px; color:var(--muted); white-space:nowrap; overflow:hidden}
+  .msgs .mt{flex:none; width:64px}
+  .msgs .HEARTBEAT .mt{color:var(--dim)}
+  .msgs .POSE_UPDATE .mt{color:#5B7A99}
+  .msgs .INTENT_UPDATE .mt{color:var(--cyan)}
+  .msgs .who{flex:none; width:24px; font-weight:700}
+
+  .eta{
+    position:absolute; pointer-events:none; background:rgba(10,14,19,.96);
+    border:1px solid var(--border); border-radius:6px; padding:7px 10px;
+    font-family:var(--mono); font-size:11px; line-height:1.6; display:none; z-index:5;
+  }
+  .eta b{color:var(--text)}
+  .eta .warnrow{color:var(--red)}
+
+  @media (max-width:900px){
+    main{flex-direction:column} aside{width:auto; border-left:none; border-top:1px solid var(--border)}
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <div>
+      <div class="brand">FLEET&#8209;<span>X</span> CONTROL CENTER</div>
+      <div class="sub">Part 1 &middot; Phase 9 &middot; robots bid for real jobs</div>
+    </div>
+    <div class="live off" id="live"><i class="dot"></i><span id="liveTxt">connecting</span></div>
+  </header>
+
+  <div class="warn">
+    <b>PHASE 9:</b>
+    <span>Press <b>Start orders</b>. Each job is shouted to the fleet and robots <b>bid</b> for it &mdash; cheapest wins, and nobody hands the work out. Kill a robot mid&#8209;job and watch its work get rescued.</span>
+  </div>
+
+  <div class="kpis" id="kpis"></div>
+
+  <main>
+    <div class="mapwrap">
+      <canvas id="cv"></canvas>
+      <div class="hint" id="hint">Pick a robot on the right, then click a floor square to send it there</div>
+      <div class="eta" id="eta"></div>
+    </div>
+
+    <aside>
+      <div class="sec">
+        <h2>Fleet <em id="selNote">&mdash; click one to control it</em></h2>
+        <div id="robots"></div>
+      </div>
+
+      <div class="sec">
+        <h2>Who gave way <em id="decNote"></em></h2>
+        <div class="decisions" id="decisions"></div>
+      </div>
+
+      <div class="sec">
+        <h2>Who is waiting for whom</h2>
+        <div class="waitg" id="waitg"></div>
+      </div>
+
+      <div class="sec">
+        <h2>Reservation table <em id="resNote"></em></h2>
+        <div class="rtable" id="rtable"></div>
+        <div id="stuckBox"></div>
+      </div>
+
+      <div class="sec">
+        <h2>Predicted conflicts <em id="confNote"></em></h2>
+        <div id="conflicts"></div>
+      </div>
+
+      <div class="sec">
+        <h2>Jobs <em id="taskNote"></em></h2>
+        <div class="btns">
+          <button data-scen="orders">Start orders</button>
+          <button data-scen="patrol">Stop orders</button>
+        </div>
+        <div class="power" id="power"></div>
+        <div class="tasks" id="tasks" style="margin-top:11px"></div>
+      </div>
+
+      <div class="sec">
+        <h2>Obstacles <em id="obsNote"></em></h2>
+        <div class="mode" id="dropMode">
+          <span>&#9646;&#9646; Drop obstacle</span>
+          <span style="color:var(--muted)">click an aisle</span>
+          <span class="st">OFF</span>
+        </div>
+        <div class="btns"><button class="wide" id="clearObs">Clear all obstacles</button></div>
+        <div class="blocks" id="blocks" style="margin-top:10px"></div>
+      </div>
+
+      <div class="sec">
+        <h2>Scenarios <em id="scenNote"></em></h2>
+        <div class="btns">
+          <button data-scen="head_on">Head&#8209;on</button>
+          <button data-scen="intersection">Intersection</button>
+          <button data-scen="patrol">Free roam</button>
+          <button data-scen="stop">Stop all</button>
+          <button class="wide" id="resetBtn">Reset collision counter</button>
+        </div>
+      </div>
+
+      <div class="sec">
+        <h2>Radio <em id="commsNote"></em></h2>
+        <div class="toggles" id="toggles"></div>
+        <div class="slider">
+          <label>Packet loss</label>
+          <input type="range" id="loss" min="0" max="90" step="5" value="0">
+          <span class="val" id="lossVal">0%</span>
+        </div>
+        <div class="slider">
+          <label>Delay</label>
+          <input type="range" id="lat" min="0" max="400" step="20" value="0">
+          <span class="val" id="latVal">0ms</span>
+        </div>
+      </div>
+
+      <div class="sec">
+        <h2>What <span id="viewOwner">R1</span> can hear</h2>
+        <div class="sees" id="sees"></div>
+        <div class="msgs" id="msgs" style="margin-top:11px"></div>
+      </div>
+
+      <div class="sec">
+        <h2>Map key</h2>
+        <div class="legend">
+          <div><i class="sw" style="background:#1B2531"></i> Shelf &mdash; cannot drive here</div>
+          <div><i class="sw" style="background:#0D1319"></i> Aisle &mdash; open floor</div>
+          <div><i class="sw" style="background:#1B3A2E"></i> Pick station</div>
+          <div><i class="sw" style="background:#123240"></i> Drop / packing</div>
+          <div><i class="sw" style="background:#3A2E12"></i> Charger</div>
+          <div><i class="sw" style="background:#22D3EE;opacity:.35"></i> Tinted square &mdash; booked by the selected robot</div>
+          <div><i class="sw" style="background:#22D3EE"></i> Diamond &mdash; collect from here &middot; Star &mdash; deliver to here</div>
+          <div><i class="sw" style="background:#7F1D1D"></i> Hatched red &mdash; obstacle a robot has found</div>
+          <div><i class="sw" style="background:#34D399"></i> Green robot &mdash; stepping out of the way</div>
+          <div><i class="sw" style="background:#F5B841"></i> Amber ring + countdown &mdash; predicted conflict</div>
+          <div><i class="sw" style="background:#F87171"></i> Red burst &mdash; a collision</div>
+          <div><i class="sw" style="background:#334155"></i> Faint ghost &mdash; where the selected robot <em>believes</em> the others are</div>
+        </div>
+      </div>
+
+      <div class="sec">
+        <h2>Event feed</h2>
+        <div class="log empty" id="log">waiting for the first event&hellip;</div>
+      </div>
+    </aside>
+  </main>
+</div>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------- colours
+const C = {
+  floor:"#0D1319", shelfTop:"#232F3E", shelf:"#1B2531", grid:"#131B24",
+  pick:"#1B3A2E", pickE:"#2E6B52", drop:"#123240", dropE:"#1E6480",
+  chg:"#3A2E12", chgE:"#7A5F1E",
+  red:"#F87171", muted:"#7A8899"
+};
+// One colour per robot, so you can tell them apart on the map and in the list.
+const ROBOT_COLORS = ["#22D3EE", "#F5B841", "#A78BFA"];
+const colorFor = (id) => {
+  if (!STATE) return ROBOT_COLORS[0];
+  const i = STATE.robots.findIndex(r => r.robot_id === id);
+  return ROBOT_COLORS[(i < 0 ? 0 : i) % ROBOT_COLORS.length];
+};
+
+// ---------------------------------------------------------------- state
+let MAP = null;            // the warehouse, fetched once
+let STATE = null;          // latest fleet snapshot
+let CELL = 24, OX = 0, OY = 0;
+let hover = null;
+let selected = "R1";       // which robot your clicks control
+let lastCollisions = 0;
+const seenEvents = new Set();   // collision ids already logged
+const bursts = [];              // red flashes currently animating
+const events = [];
+
+const cv  = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+
+// ---------------------------------------------------------------- boot
+async function boot(){
+  MAP = await (await fetch("/api/map")).json();
+  layout();
+  bindNetwork();
+  connect();
+  requestAnimationFrame(draw);
+}
+
+function connect(){
+  const es = new EventSource("/api/stream");
+  es.onopen  = () => setLive(true);
+  es.onerror = () => setLive(false);
+  es.onmessage = (e) => {
+    const prev = STATE;
+    STATE = JSON.parse(e.data);
+    setLive(true);
+    renderKpis();
+    renderRobots();
+    renderScenario();
+    renderDecisions();
+    renderTasks();
+    renderBlocks();
+    renderWaitGraph();
+    renderReservations();
+    renderConflicts();
+    renderToggles();
+    renderSees();
+    watchForEvents(prev, STATE);
+    watchConflicts(STATE);
+    watchDecisions(STATE);
+    catchCollisions(STATE);
+  };
+}
+function setLive(on){
+  const el = document.getElementById("live");
+  el.className = "live " + (on ? "on" : "off");
+  document.getElementById("liveTxt").textContent = on ? "live" : "disconnected";
+}
+
+// ---------------------------------------------------------------- sizing
+function layout(){
+  const wrap = cv.parentElement;
+  const availW = wrap.clientWidth  - 36;
+  const availH = wrap.clientHeight - 36;
+  CELL = Math.max(10, Math.floor(Math.min(availW / MAP.width, availH / MAP.height)));
+  const w = MAP.width * CELL, h = MAP.height * CELL;
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = w * dpr; cv.height = h * dpr;
+  cv.style.width = w + "px"; cv.style.height = h + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  OX = 0; OY = 0;
+}
+window.addEventListener("resize", () => { if (MAP) layout(); });
+
+// ---------------------------------------------------------------- drawing
+function draw(){
+  if (MAP){
+    drawMap();
+    if (STATE){ drawBookings(); drawObstacles(); drawJobs(); drawBeliefs(); drawPaths(); drawGoals(); drawConflicts(); drawRobots(); }
+    drawBursts();
+    drawHover();
+  }
+  requestAnimationFrame(draw);
+}
+
+function drawMap(){
+  const W = MAP.width * CELL, H = MAP.height * CELL;
+  ctx.fillStyle = C.floor; ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let x=0; x<=MAP.width;  x++){ ctx.moveTo(x*CELL+.5, 0); ctx.lineTo(x*CELL+.5, H); }
+  for (let y=0; y<=MAP.height; y++){ ctx.moveTo(0, y*CELL+.5); ctx.lineTo(W, y*CELL+.5); }
+  ctx.stroke();
+
+  for (let y=0; y<MAP.height; y++){
+    for (let x=0; x<MAP.width; x++){
+      const kind = MAP.cells[y][x];
+      if (kind === "FLOOR") continue;
+      const px = x*CELL, py = y*CELL;
+      if (kind === "SHELF"){
+        ctx.fillStyle = C.shelf; ctx.fillRect(px+1, py+1, CELL-2, CELL-2);
+        ctx.fillStyle = C.shelfTop; ctx.fillRect(px+1, py+1, CELL-2, Math.max(2, CELL*0.16));
+      } else {
+        const fill = kind==="PICK" ? C.pick : kind==="DROP" ? C.drop : C.chg;
+        const edge = kind==="PICK" ? C.pickE: kind==="DROP" ? C.dropE: C.chgE;
+        ctx.fillStyle = fill; ctx.fillRect(px+1, py+1, CELL-2, CELL-2);
+        ctx.strokeStyle = edge; ctx.lineWidth = 1;
+        ctx.strokeRect(px+1.5, py+1.5, CELL-3, CELL-3);
+        if (CELL >= 16){
+          ctx.fillStyle = edge;
+          ctx.font = `600 ${Math.floor(CELL*0.46)}px ui-monospace,Menlo,monospace`;
+          ctx.textAlign="center"; ctx.textBaseline="middle";
+          ctx.fillText(kind[0], px+CELL/2, py+CELL/2+1);
+        }
+      }
+    }
+  }
+}
+
+function drawPaths(){
+  for (const r of STATE.robots){
+    if (!r.path.length) continue;
+    const col = colorFor(r.robot_id);
+    ctx.save();
+    ctx.strokeStyle = col;
+    ctx.globalAlpha = (r.robot_id === selected) ? .60 : .30;
+    ctx.lineWidth = Math.max(2, CELL*0.12);
+    ctx.lineCap="round"; ctx.lineJoin="round";
+    ctx.setLineDash([CELL*0.28, CELL*0.28]);
+    ctx.beginPath();
+    ctx.moveTo(r.x*CELL+CELL/2, r.y*CELL+CELL/2);
+    for (const [px,py] of r.path) ctx.lineTo(px*CELL+CELL/2, py*CELL+CELL/2);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+function drawGoals(){
+  const t = performance.now()/1000;
+  for (const r of STATE.robots){
+    if (!r.goal) continue;
+    const col = colorFor(r.robot_id);
+    const cx = r.goal[0]*CELL+CELL/2, cy = r.goal[1]*CELL+CELL/2;
+    const pulse = 0.5 + 0.5*Math.sin(t*3);
+    ctx.save();
+    ctx.strokeStyle = col; ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.25 + 0.40*pulse;
+    ctx.beginPath(); ctx.arc(cx, cy, CELL*(0.30 + 0.14*pulse), 0, Math.PI*2); ctx.stroke();
+    ctx.globalAlpha = 0.8;
+    ctx.beginPath(); ctx.arc(cx, cy, Math.max(1.5, CELL*0.08), 0, Math.PI*2);
+    ctx.fillStyle = col; ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ---- Phase 9: where each live job starts and ends ----
+function drawJobs(){
+  const t = performance.now()/1000;
+  for (const job of (STATE.tasks || [])){
+    if (job.status === "DONE" || job.status === "FAILED") continue;
+    const col = job.assigned_robot ? colorFor(job.assigned_robot) : "#7A8899";
+    const showPickup = job.status !== "CARRYING";
+    ctx.save();
+    ctx.globalAlpha = job.assigned_robot ? .85 : .45 + .25*Math.sin(t*3);
+    ctx.strokeStyle = col; ctx.lineWidth = Math.max(1.5, CELL*0.08);
+
+    if (showPickup){                                  // diamond = collect here
+      const cx = job.pickup[0]*CELL+CELL/2, cy = job.pickup[1]*CELL+CELL/2;
+      const r = CELL*0.26;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy-r); ctx.lineTo(cx+r, cy);
+      ctx.lineTo(cx, cy+r); ctx.lineTo(cx-r, cy); ctx.closePath(); ctx.stroke();
+    }
+    {                                                  // star = deliver here
+      const cx = job.dropoff[0]*CELL+CELL/2, cy = job.dropoff[1]*CELL+CELL/2;
+      const r = CELL*0.28;
+      ctx.beginPath();
+      for (let k=0;k<10;k++){
+        const ang = -Math.PI/2 + k*Math.PI/5;
+        const rr = k%2 ? r*0.45 : r;
+        const fn = k ? "lineTo" : "moveTo";
+        ctx[fn](cx+Math.cos(ang)*rr, cy+Math.sin(ang)*rr);
+      }
+      ctx.closePath(); ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+// ---- Phase 8: things in the way ----
+// Solid = actually on the floor. A red outline means the SELECTED robot knows
+// about it. An obstacle nobody has driven near yet is drawn faintly: it is
+// really there, but no robot has found it.
+function drawObstacles(){
+  const real = STATE.obstacles || [];
+  const view = (STATE.views || {})[selected];
+  const known = new Set((view && view.blocked || []).map(b => b.cell.join(",")));
+  const t = performance.now() / 1000;
+
+  for (const [ox, oy] of real){
+    const px = ox*CELL, py = oy*CELL;
+    const seen = known.has(`${ox},${oy}`);
+    ctx.save();
+    ctx.globalAlpha = seen ? 0.95 : 0.35;
+    ctx.fillStyle = "#7F1D1D";
+    ctx.fillRect(px+1, py+1, CELL-2, CELL-2);
+
+    // hazard hatching
+    ctx.strokeStyle = seen ? "#FCA5A5" : "#B45454";
+    ctx.lineWidth = Math.max(1, CELL*0.07);
+    ctx.beginPath();
+    for (let k = -CELL; k < CELL; k += Math.max(4, CELL*0.28)){
+      ctx.moveTo(px + k, py + CELL);
+      ctx.lineTo(px + k + CELL, py);
+    }
+    ctx.save(); ctx.rect(px+1, py+1, CELL-2, CELL-2); ctx.clip(); ctx.stroke(); ctx.restore();
+
+    if (seen){
+      ctx.globalAlpha = 0.6 + 0.4*Math.sin(t*3);
+      ctx.strokeStyle = C.red; ctx.lineWidth = 2;
+      ctx.strokeRect(px+1.5, py+1.5, CELL-3, CELL-3);
+    }
+    ctx.restore();
+  }
+
+  // A square the selected robot BELIEVES is blocked but which is not really
+  // there any more -- out of date knowledge, waiting to expire.
+  const realSet = new Set(real.map(c => c.join(",")));
+  for (const b of (view && view.blocked) || []){
+    const key = b.cell.join(",");
+    if (realSet.has(key)) continue;
+    const [ox, oy] = b.cell;
+    ctx.save();
+    ctx.globalAlpha = .35; ctx.strokeStyle = C.red; ctx.lineWidth = 1.5;
+    ctx.setLineDash([3,3]);
+    ctx.strokeRect(ox*CELL+2, oy*CELL+2, CELL-4, CELL-4);
+    ctx.restore();
+  }
+}
+
+// ---- Phase 5: tint the squares each robot has booked ----
+// A robot may not enter a square it has not booked. These tints are what it
+// currently owns; if the square ahead is somebody else's, it stops short.
+function drawBookings(){
+  const views = STATE.views || {};
+  for (const r of STATE.robots){
+    const view = views[r.robot_id];
+    if (!view || !view.holds) continue;
+    const mine = r.robot_id === selected;
+    const col = colorFor(r.robot_id);
+    ctx.save();
+    ctx.globalAlpha = mine ? .20 : .09;
+    ctx.fillStyle = col;
+    for (const [bx, by] of view.holds){
+      ctx.fillRect(bx*CELL+1, by*CELL+1, CELL-2, CELL-2);
+    }
+    if (mine){
+      ctx.globalAlpha = .35; ctx.strokeStyle = col; ctx.lineWidth = 1;
+      for (const [bx, by] of view.holds){
+        ctx.strokeRect(bx*CELL+1.5, by*CELL+1.5, CELL-3, CELL-3);
+      }
+    }
+    ctx.restore();
+  }
+}
+
+// ---- Phase 4: mark every square two robots are about to fight over ----
+function drawConflicts(){
+  const list = STATE.conflicts || [];
+  const t = performance.now()/1000;
+
+  for (const c of list){
+    const [cx0, cy0] = c.cell;
+    const cx = cx0*CELL + CELL/2, cy = cy0*CELL + CELL/2;
+    const urgent = c.lead_time < 1.5;
+    const col = urgent ? C.red : C.amber;
+    const pulse = 0.5 + 0.5*Math.sin(t * (urgent ? 8 : 4));
+
+    // a thin line joining the two robots that are about to clash
+    const ra = STATE.robots.find(r => r.robot_id === c.robot_a);
+    const rb = STATE.robots.find(r => r.robot_id === c.robot_b);
+    if (ra && rb){
+      ctx.save();
+      ctx.strokeStyle = col; ctx.globalAlpha = .18 + .12*pulse;
+      ctx.lineWidth = 1.5; ctx.setLineDash([4,4]);
+      ctx.beginPath();
+      ctx.moveTo(ra.x*CELL+CELL/2, ra.y*CELL+CELL/2);
+      ctx.lineTo(cx, cy);
+      ctx.lineTo(rb.x*CELL+CELL/2, rb.y*CELL+CELL/2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // the contested square itself
+    ctx.save();
+    ctx.globalAlpha = .13 + .13*pulse;
+    ctx.fillStyle = col;
+    ctx.fillRect(cx0*CELL+1, cy0*CELL+1, CELL-2, CELL-2);
+    ctx.globalAlpha = .55 + .35*pulse;
+    ctx.strokeStyle = col; ctx.lineWidth = 2;
+    ctx.strokeRect(cx0*CELL+2, cy0*CELL+2, CELL-4, CELL-4);
+
+    // seconds until it happens
+    if (CELL >= 16){
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = col;
+      ctx.font = `700 ${Math.floor(CELL*0.40)}px ui-monospace,Menlo,monospace`;
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(c.lead_time.toFixed(1), cx, cy);
+    }
+    ctx.restore();
+  }
+}
+
+// ---- Phase 3: draw what the SELECTED robot believes about the others ----
+// This is the point of decentralised. R1's picture of R2 is not R2 -- it is
+// whatever R2 last managed to shout, which may be old or may never have arrived.
+function drawBeliefs(){
+  const view = (STATE.views || {})[selected];
+  if (!view) return;
+
+  for (const n of view.neighbours){
+    const col = colorFor(n.robot_id);
+    const gx = n.x*CELL + CELL/2, gy = n.y*CELL + CELL/2;
+
+    // the route it CLAIMS it will take
+    if (n.planned_nodes.length && !n.stale){
+      ctx.save();
+      ctx.strokeStyle = col; ctx.globalAlpha = .17;
+      ctx.lineWidth = Math.max(1.5, CELL*0.09);
+      ctx.setLineDash([CELL*0.16, CELL*0.22]);
+      ctx.lineCap="round"; ctx.lineJoin="round";
+      ctx.beginPath();
+      ctx.moveTo(gx, gy);
+      for (const [px,py] of n.planned_nodes) ctx.lineTo(px*CELL+CELL/2, py*CELL+CELL/2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // where it is BELIEVED to be -- hollow, faded, and greyed out if stale
+    ctx.save();
+    ctx.globalAlpha = n.stale ? .30 : .48;
+    ctx.strokeStyle = n.stale ? C.red : col;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash(n.stale ? [3,3] : [5,3]);
+    ctx.beginPath(); ctx.arc(gx, gy, CELL*0.46, 0, Math.PI*2); ctx.stroke();
+    ctx.setLineDash([]);
+    if (CELL >= 16){
+      ctx.globalAlpha = n.stale ? .7 : .55;
+      ctx.fillStyle = n.stale ? C.red : col;
+      ctx.font = `600 ${Math.floor(CELL*0.28)}px ui-monospace,Menlo,monospace`;
+      ctx.textAlign="center"; ctx.textBaseline="top";
+      ctx.fillText(n.stale ? "STALE "+n.age+"s" : n.age+"s", gx, gy + CELL*0.5);
+    }
+    ctx.restore();
+  }
+}
+
+const NOSE = { N:[0,-1], E:[1,0], S:[0,1], W:[-1,0] };
+
+function drawRobots(){
+  for (const r of STATE.robots){
+    const cx = r.x*CELL + CELL/2, cy = r.y*CELL + CELL/2;
+    const rad = CELL*0.34;
+    const col = r.status==="BLOCKED" ? C.red
+              : r.status==="WAITING" ? C.amber
+              : r.status==="REROUTING" ? "#A78BFA"
+              : r.status==="YIELDING" ? C.green : colorFor(r.robot_id);
+    const isSel = r.robot_id === selected;
+
+    ctx.save();
+    ctx.globalAlpha = .16; ctx.fillStyle = col;
+    ctx.beginPath(); ctx.arc(cx, cy, rad*2.0, 0, Math.PI*2); ctx.fill();
+
+    if (isSel){                                   // ring on the one you control
+      ctx.globalAlpha = .5; ctx.strokeStyle = col; ctx.lineWidth = 1.5;
+      ctx.setLineDash([3,3]);
+      ctx.beginPath(); ctx.arc(cx, cy, rad*1.55, 0, Math.PI*2); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "#0A0E13";
+    ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI*2); ctx.fill();
+    ctx.strokeStyle = col; ctx.lineWidth = Math.max(2, CELL*0.10);
+    ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI*2); ctx.stroke();
+
+    const d = NOSE[r.heading] || NOSE.E;
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(cx + d[0]*rad*0.72, cy + d[1]*rad*0.72, Math.max(1.5, CELL*0.085), 0, Math.PI*2);
+    ctx.fill();
+
+    if (CELL >= 18){
+      ctx.fillStyle = col;
+      ctx.font = `700 ${Math.floor(CELL*0.34)}px ui-monospace,Menlo,monospace`;
+      ctx.textAlign="center"; ctx.textBaseline="bottom";
+      ctx.fillText(r.robot_id, cx, cy - rad - 3);
+    }
+    // held up: a small bar showing which way it is being stopped
+    if (r.status === "WAITING"){
+      const d2 = NOSE[r.heading] || NOSE.E;
+      ctx.strokeStyle = C.amber; ctx.lineWidth = Math.max(2, CELL*0.09);
+      ctx.globalAlpha = .85;
+      ctx.beginPath();
+      ctx.moveTo(cx + d2[0]*rad*1.25 - d2[1]*rad*0.7, cy + d2[1]*rad*1.25 + d2[0]*rad*0.7);
+      ctx.lineTo(cx + d2[0]*rad*1.25 + d2[1]*rad*0.7, cy + d2[1]*rad*1.25 - d2[0]*rad*0.7);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+}
+
+// red burst wherever two robots hit each other
+function catchCollisions(state){
+  for (const e of (state.collision_events || [])){
+    if (seenEvents.has(e.id)) continue;
+    seenEvents.add(e.id);
+    bursts.push({x:e.x, y:e.y, born:performance.now()});
+    const tag = e.predicted ? ` (called ${e.warning}s early)` : " (NOT predicted)";
+    log(`${e.robots.join(" and ")} COLLIDED at (${Math.round(e.x)}, ${Math.round(e.y)})${tag}`, true);
+  }
+}
+
+function drawBursts(){
+  const now = performance.now();
+  const LIFE = 1500;
+  for (let i = bursts.length-1; i >= 0; i--){
+    const b = bursts[i];
+    const age = (now - b.born) / LIFE;
+    if (age >= 1){ bursts.splice(i,1); continue; }
+    const cx = b.x*CELL + CELL/2, cy = b.y*CELL + CELL/2;
+    ctx.save();
+    ctx.globalAlpha = (1-age) * 0.9;
+    ctx.strokeStyle = C.red; ctx.lineWidth = Math.max(2, CELL*0.12);
+    ctx.beginPath(); ctx.arc(cx, cy, CELL*(0.3 + age*1.5), 0, Math.PI*2); ctx.stroke();
+    ctx.globalAlpha = (1-age) * 0.5;
+    ctx.fillStyle = C.red;
+    ctx.beginPath(); ctx.arc(cx, cy, CELL*0.30*(1-age), 0, Math.PI*2); ctx.fill();
+    if (age < 0.6 && CELL >= 16){
+      ctx.globalAlpha = 1-age/0.6;
+      ctx.fillStyle = C.red;
+      ctx.font = `700 ${Math.floor(CELL*0.7)}px ui-monospace,Menlo,monospace`;
+      ctx.textAlign="center"; ctx.textBaseline="middle";
+      ctx.fillText("✕", cx, cy);
+    }
+    ctx.restore();
+  }
+}
+
+function drawHover(){
+  if (!hover) return;
+  const walk = MAP.cells[hover.y][hover.x] !== "SHELF";
+  ctx.save();
+  ctx.strokeStyle = walk ? colorFor(selected) : C.red;
+  ctx.globalAlpha = .85; ctx.lineWidth = 2;
+  ctx.strokeRect(hover.x*CELL+1.5, hover.y*CELL+1.5, CELL-3, CELL-3);
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------- clicking
+function cellAt(evt){
+  const b = cv.getBoundingClientRect();
+  const x = Math.floor((evt.clientX - b.left - OX) / CELL);
+  const y = Math.floor((evt.clientY - b.top  - OY) / CELL);
+  if (x<0 || y<0 || x>=MAP.width || y>=MAP.height) return null;
+  return {x,y};
+}
+cv.addEventListener("mousemove", e => {
+  hover = cellAt(e);
+  showEta(e);
+});
+cv.addEventListener("mouseleave", () => { hover = null; document.getElementById("eta").style.display = "none"; });
+
+// Hover a square: read out every robot that says it will be standing there,
+// and in how long. Two overlapping times on one square IS the crash, visible
+// before it happens. Phase 4 makes the robots act on this; here you just see it.
+function showEta(evt){
+  const box = document.getElementById("eta");
+  if (!hover || !STATE){ box.style.display = "none"; return; }
+
+  const view = (STATE.views || {})[selected];
+  const me = STATE.robots.find(r => r.robot_id === selected);
+  const rows = [];
+
+  if (me){
+    const i = me.path.findIndex(p => p[0]===hover.x && p[1]===hover.y);
+    if (i >= 0) rows.push({id:selected, eta:(i+1)/2.5, mine:true});
+  }
+  if (view){
+    for (const n of view.neighbours){
+      if (n.stale) continue;
+      const i = n.planned_nodes.findIndex(p => p[0]===hover.x && p[1]===hover.y);
+      if (i >= 0) rows.push({id:n.robot_id, eta:n.node_etas[i], mine:false});
+    }
+  }
+
+  if (!rows.length){ box.style.display = "none"; return; }
+  rows.sort((a,b) => a.eta - b.eta);
+
+  // Two robots claiming the same square within a second of each other.
+  const clash = rows.length > 1 && (rows[1].eta - rows[0].eta) < 1.0;
+
+  const wrapBox = cv.parentElement.getBoundingClientRect();
+  box.innerHTML =
+    `<div style="color:#7A8899">square (${hover.x}, ${hover.y})</div>` +
+    rows.map(r =>
+      `<div><b style="color:${colorFor(r.id)}">${r.id}</b> arrives in ${r.eta.toFixed(1)}s${r.mine?" (you)":""}</div>`
+    ).join("") +
+    (clash ? `<div class="warnrow">&#9888; both within 1s &mdash; this is a crash</div>` : "");
+  box.style.display = "block";
+  box.style.left = (evt.clientX - wrapBox.left + 16) + "px";
+  box.style.top  = (evt.clientY - wrapBox.top  + 16) + "px";
+}
+let dropMode = false;
+cv.addEventListener("click", e => {
+  const c = cellAt(e); if (!c) return;
+  if (dropMode) dropObstacle(c.x, c.y); else sendTo(c.x, c.y);
+});
+
+async function dropObstacle(x, y){
+  const out = await post("/api/obstacle", {action: "toggle", x, y});
+  showHint(out.message); log(out.message);
+}
+
+document.getElementById("dropMode").addEventListener("click", () => {
+  dropMode = !dropMode;
+  const el = document.getElementById("dropMode");
+  el.classList.toggle("on", dropMode);
+  el.querySelector(".st").textContent = dropMode ? "ON" : "OFF";
+  cv.style.cursor = dropMode ? "cell" : "crosshair";
+  showHint(dropMode
+    ? "Click an aisle to drop something in it. Click it again to pick it up."
+    : "Back to sending robots. Click a floor square.");
+});
+
+document.getElementById("clearObs").addEventListener("click", async () => {
+  const out = await post("/api/obstacle", {action: "clear"});
+  showHint(out.message); log(out.message);
+});
+
+async function post(url, body){
+  const res = await fetch(url, {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify(body || {})
+  });
+  return res.json();
+}
+
+async function sendTo(x, y){
+  const out = await post("/api/goal", {robot_id:selected, x, y});
+  showHint(out.ok
+    ? `<b style="color:${colorFor(selected)}">${selected}</b> &rarr; (${x}, ${y})`
+    : out.message);
+  log(out.ok ? `${selected} sent to (${x}, ${y})` : out.message);
+}
+
+function showHint(html){
+  const hint = document.getElementById("hint");
+  hint.innerHTML = html;
+  hint.style.opacity = 1;
+  clearTimeout(showHint._t);
+  showHint._t = setTimeout(()=>{ hint.style.opacity = .5; }, 2800);
+}
+
+document.querySelectorAll("[data-scen]").forEach(btn => {
+  btn.addEventListener("click", async () => {
+    const out = await post("/api/scenario", {name: btn.dataset.scen});
+    showHint(out.message); log(out.message);
+    bursts.length = 0; seenConflicts.clear(); lastDecisionTime = -1;
+  });
+});
+document.getElementById("resetBtn").addEventListener("click", async () => {
+  const out = await post("/api/reset", {});
+  seenEvents.clear(); bursts.length = 0; lastCollisions = 0;
+  showHint(out.message); log(out.message);
+});
+
+// ------------------------------------------- Phase 6: who gave way
+const TASK_LABEL = {ANNOUNCED:"for bids", ASSIGNED:"collecting",
+                    CARRYING:"delivering", DONE:"done", QUEUED:"queued"};
+
+function renderTasks(){
+  const k = STATE.kpis;
+  document.getElementById("taskNote").textContent =
+    `— ${k.task_done}/${k.task_created} done` +
+    (k.task_avg_task_time ? `, avg ${k.task_avg_task_time}s` : "");
+
+  const rows = STATE.tasks || [];
+  document.getElementById("tasks").innerHTML = rows.length
+    ? rows.map(t => `<div class="row ${t.status}">
+        <span class="tid">${t.task_id}</span>
+        <span class="leg">(${t.pickup[0]},${t.pickup[1]})&rarr;(${t.dropoff[0]},${t.dropoff[1]})${
+          t.reassignments ? ` <span style="color:var(--amber)">&#8635;${t.reassignments}</span>` : ""}</span>
+        <span class="who" style="color:${t.assigned_robot ? colorFor(t.assigned_robot) : "var(--dim)"}">${t.assigned_robot || "—"}</span>
+        <span class="st">${TASK_LABEL[t.status] || t.status}</span>
+      </div>`).join("")
+    : `<div class="none">no jobs yet — press Start orders</div>`;
+
+  document.getElementById("power").innerHTML = STATE.robots.map(r => {
+    const dead = r.status === "FAILED";
+    return `<button class="${dead?"dead":""}" data-power="${r.robot_id}" data-alive="${dead?1:0}">
+      ${dead ? "Revive" : "Fail"} ${r.robot_id}</button>`;
+  }).join("");
+  document.querySelectorAll("[data-power]").forEach(b => {
+    b.addEventListener("click", async () => {
+      const out = await post("/api/power",
+        {robot_id: b.dataset.power, alive: b.dataset.alive === "1"});
+      showHint(out.message); log(out.message);
+    });
+  });
+}
+
+function renderBlocks(){
+  const view = (STATE.views || {})[selected];
+  const rows = (view && view.blocked) || [];
+  const real = (STATE.obstacles || []).length;
+  document.getElementById("obsNote").textContent =
+    `— ${real} on the floor, ${rows.length} known to ${selected}`;
+  document.getElementById("blocks").innerHTML = rows.length
+    ? rows.map(b => `<div>
+        <span style="color:var(--red)">&#9646;</span>
+        <span>(${b.cell[0]}, ${b.cell[1]})</span>
+        <span style="color:var(--dim)">found by ${b.reported_by}</span>
+        <span style="margin-left:auto;color:var(--dim)">fades in ${b.remaining}s</span>
+      </div>`).join("")
+    : `<div class="none">${selected} knows of nothing in the way</div>`;
+}
+
+function renderWaitGraph(){
+  const rows = STATE.wait_graph || [];
+  document.getElementById("waitg").innerHTML = rows.length
+    ? rows.map(r => `<div>
+        <b style="color:${colorFor(r.robot_id)}">${r.robot_id}</b>
+        <span>waiting for</span>
+        <b style="color:${colorFor(r.blocked_by)}">${r.blocked_by}</b>
+        <span style="margin-left:auto;color:var(--dim)">${r.waiting}s</span>
+      </div>`).join("")
+    : `<div class="none">nobody is waiting for anybody</div>`;
+}
+
+function renderDecisions(){
+  const list = STATE.decisions || [];
+  document.getElementById("decNote").textContent =
+    `— ${STATE.kpis.reroutes} reroute${STATE.kpis.reroutes === 1 ? "" : "s"}`;
+  document.getElementById("decisions").innerHTML = list.length
+    ? list.map(d => `<div><time>${d.sim_time.toFixed(1)}s</time><span>${d.text}</span></div>`).join("")
+    : `<div class="none">nobody has had to give way yet</div>`;
+}
+
+// ---------------------------------------------- Phase 5: booking table
+function renderReservations(){
+  const view = (STATE.views || {})[selected];
+  const rows = (view && view.table) || [];
+  document.getElementById("resNote").textContent = `— as ${selected} sees it`;
+
+  const el = document.getElementById("rtable");
+  el.innerHTML = rows.length
+    ? `<div class="hd"><span class="o">WHO</span><span class="w">WHERE</span><span class="t">TIME</span><span class="g"></span></div>` +
+      rows.map(r => `<div class="${r.granted ? "" : "no"}">
+        <span class="o" style="color:${colorFor(r.robot_id)}">${r.robot_id}</span>
+        <span class="w">${r.where}</span>
+        <span class="t">${r.start.toFixed(1)}–${r.end.toFixed(1)}</span>
+        <span class="g">${r.granted ? "✓" : "✕"}</span>
+      </div>`).join("")
+    : `<div style="color:var(--dim)">nothing booked</div>`;
+
+  const stuck = STATE.stuck || [];
+  document.getElementById("stuckBox").innerHTML = stuck.length
+    ? `<div class="stuck">&#9888; <b>${stuck.join(", ")}</b> stuck waiting &mdash; deadlock. Phases 6&ndash;7 fix this.</div>`
+    : "";
+}
+
+// ------------------------------------------------ Phase 4: conflict list
+const KIND_LABEL = {
+  SAME_SQUARE: "same square", HEAD_ON: "head-on", JUNCTION: "junction"
+};
+
+function renderConflicts(){
+  const list = STATE.conflicts || [];
+  const k = STATE.kpis;
+  document.getElementById("confNote").textContent =
+    `— predicted ${k.collisions_predicted}/${k.collisions} crashes`;
+
+  const el = document.getElementById("conflicts");
+  if (!list.length){
+    el.innerHTML = `<div class="noconf">no clashes coming up</div>`;
+    return;
+  }
+  el.innerHTML = list.map(c => `
+    <div class="conf ${c.lead_time < 1.5 ? "soon" : ""}">
+      <span class="pair">
+        <span style="color:${colorFor(c.robot_a)}">${c.robot_a}</span>
+        <span style="color:var(--dim)">&#8596;</span>
+        <span style="color:${colorFor(c.robot_b)}">${c.robot_b}</span>
+      </span>
+      <span class="where">(${c.cell[0]},${c.cell[1]})<br><span class="kind">${KIND_LABEL[c.kind]||c.kind}</span></span>
+      <span class="cd">${c.lead_time.toFixed(1)}s</span>
+    </div>`).join("");
+}
+
+// ------------------------------------------------- Phase 3: radio controls
+function renderToggles(){
+  const silenced = new Set((STATE.bus && STATE.bus.silenced) || []);
+  document.getElementById("toggles").innerHTML = STATE.robots.map(r => {
+    const off = silenced.has(r.robot_id);
+    return `<div class="tog ${off?"mute":""}" data-mute="${r.robot_id}">
+      <span class="rid2" style="color:${colorFor(r.robot_id)}">${r.robot_id}</span>
+      <span style="color:var(--muted)">${off ? "transmitter off" : "broadcasting"}</span>
+      <span class="st">${off ? "SILENCED" : String(r.messages_sent)}</span>
+    </div>`;
+  }).join("");
+
+  document.querySelectorAll("[data-mute]").forEach(el => {
+    el.addEventListener("click", async () => {
+      const rid = el.dataset.mute;
+      const on = !silenced.has(rid);
+      const out = await post("/api/silence", {robot_id: rid, on});
+      showHint(out.message); log(out.message);
+    });
+  });
+
+  const b = STATE.bus || {};
+  document.getElementById("commsNote").textContent =
+    `— ${b.delivered || 0} delivered, ${b.dropped || 0} lost`;
+}
+
+function bindNetwork(){
+  const loss = document.getElementById("loss"), lat = document.getElementById("lat");
+  const push = async () => {
+    document.getElementById("lossVal").textContent = loss.value + "%";
+    document.getElementById("latVal").textContent  = lat.value + "ms";
+    await post("/api/network", {loss: loss.value/100, latency_ms: +lat.value});
+  };
+  loss.addEventListener("input", () => {
+    document.getElementById("lossVal").textContent = loss.value + "%"; });
+  lat.addEventListener("input", () => {
+    document.getElementById("latVal").textContent = lat.value + "ms"; });
+  loss.addEventListener("change", push);
+  lat.addEventListener("change", push);
+}
+
+function renderSees(){
+  document.getElementById("viewOwner").textContent = selected;
+  document.getElementById("viewOwner").style.color = colorFor(selected);
+  const view = (STATE.views || {})[selected];
+  const el = document.getElementById("sees");
+  if (!view || !view.neighbours.length){
+    el.innerHTML = `<span class="see">hears nobody yet</span>`;
+  } else {
+    el.innerHTML = view.neighbours.map(n =>
+      `<span class="see ${n.stale?"stale":"ok"}">${n.robot_id} ${n.stale?"STALE":"\u2713"} ${n.age}s${n.missed?` \u00b7 ${n.missed} lost`:""}</span>`
+    ).join("");
+  }
+
+  document.getElementById("msgs").innerHTML = (STATE.messages || []).map(m => {
+    const extra = m.type === "INTENT_UPDATE"
+        ? (m.destination ? `dest (${m.destination[0]},${m.destination[1]}) eta ${m.eta_destination ?? "-"}s` : "no destination")
+      : m.type === "POSE_UPDATE" ? `(${m.x.toFixed(1)}, ${m.y.toFixed(1)}) v=${m.velocity}`
+      : `${m.battery}% ${m.status}`;
+    return `<div class="${m.type}">
+      <span class="mt">${m.type.replace("_UPDATE","")}</span>
+      <span class="who" style="color:${colorFor(m.robot_id)}">${m.robot_id}</span>
+      <span>${extra}</span></div>`;
+  }).join("");
+}
+
+// ---------------------------------------------------------------- panels
+function renderKpis(){
+  const k = STATE.kpis;
+  const hit = k.collisions > lastCollisions;
+  lastCollisions = k.collisions;
+  const cells = [
+    ["Robots",     k.robots,            ""],
+    ["Collisions", k.collisions,        k.collisions ? "bad" : "good"],
+    ["Jobs done",  `${k.task_done}/${k.task_created}`, k.task_done ? "good" : ""],
+    ["Avg job",    k.task_avg_task_time ? k.task_avg_task_time + "s" : "—", ""],
+    ["Jobs/hr",    k.task_tasks_per_hour || 0, ""],
+    ["Deadlocked", k.deadlocked,        k.deadlocked ? "bad" : "good"],
+    ["Obstacles",  k.obstacles,         k.obstacles ? "warn" : ""],
+    ["Jams broken", k.deadlocks_broken,  ""],
+    ["Reroutes",   k.reroutes,          ""],
+    ["Sim time",   fmt(k.sim_time),     ""],
+  ];
+  document.getElementById("kpis").innerHTML = cells.map(([kk,v,cls],i) =>
+    `<div class="kpi ${(i===1 && hit) ? "hit" : ""}">
+       <div class="k">${kk}</div><div class="v ${cls}">${v}</div>
+     </div>`).join("");
+}
+
+function renderRobots(){
+  document.getElementById("robots").innerHTML = STATE.robots.map(r => {
+    const col = colorFor(r.robot_id);
+    const bcls = r.battery>50 ? "" : r.battery>20 ? "warn" : "bad";
+    const goal = r.goal ? `${r.goal[0]}, ${r.goal[1]}` : "&mdash;";
+    const sel = r.robot_id === selected;
+    return `<div class="robot ${sel?"sel":""}" data-rid="${r.robot_id}" style="border-left-color:${col}">
+      <div class="row1">
+        <span class="rid" style="color:${col}">${r.robot_id}</span>
+        <span class="badge ${r.status}">${r.status}</span>
+        <span class="pick">${sel ? "controlling" : "select"}</span>
+      </div>
+      <div class="prio">priority <b>${(r.priority/10).toFixed(1)}</b>${
+        r.priority > 50 ? ` <span class="up">&uarr;+${((r.priority-50)/10).toFixed(1)}</span>` : ""
+      }${r.reroutes ? ` &middot; ${r.reroutes} reroute${r.reroutes>1?"s":""}` : ""}</div>
+      <div class="bar"><i class="${bcls}" style="width:${r.battery}%"></i></div>
+      <div class="stats">
+        <div><span>At</span><span>${r.cell[0]}, ${r.cell[1]}</span></div>
+        <div><span>Goal</span><span>${goal}</span></div>
+        <div><span>Steps</span><span>${r.steps}</span></div>
+        <div><span>Left</span><span>${r.path.length}</span></div>
+        ${r.task ? `<div><span>Job</span><span style="color:${col}">${r.task}</span></div>` : ""}
+        ${r.tasks_done ? `<div><span>Done</span><span>${r.tasks_done}</span></div>` : ""}
+        ${r.blocked_by ? `<div><span>Held by</span><span style="color:${colorFor(r.blocked_by)}">${r.blocked_by}</span></div>` : ""}
+        ${r.waiting > 0.3 ? `<div><span>Stuck</span><span style="color:var(--amber)">${r.waiting.toFixed(1)}s</span></div>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+
+  document.querySelectorAll("[data-rid]").forEach(el => {
+    el.addEventListener("click", () => {
+      selected = el.dataset.rid;
+      document.getElementById("selNote").innerHTML =
+        `&mdash; clicks control <b style="color:${colorFor(selected)}">${selected}</b>`;
+      renderRobots(); renderSees(); renderReservations(); renderDecisions(); renderWaitGraph(); renderBlocks(); renderTasks();
+    });
+  });
+}
+
+function renderScenario(){
+  const note = STATE.auto ? "free roam running" : STATE.scenario.replace("_"," ");
+  document.getElementById("scenNote").textContent = "— " + note;
+  document.querySelectorAll("[data-scen]").forEach(b =>
+    b.classList.toggle("on", b.dataset.scen === STATE.scenario));
+}
+
+let lastDecisionTime = -1;
+function watchDecisions(state){
+  for (const d of [...(state.decisions || [])].reverse()){
+    if (d.sim_time > lastDecisionTime){
+      lastDecisionTime = d.sim_time;
+      if (/^ORDER /.test(d.text)) logOrder(d.text);
+      else if (/auction|collected|delivered|gave up|back up for auction/.test(d.text)) logTask(d.text);
+      else if (/blocking|is clear again|expired/.test(d.text)) logFound(d.text);
+      else if (/asked|boxed in|stepped aside|moving aside|back on the job/.test(d.text)) logJam(d.text);
+      else logGave(d.text);
+    }
+  }
+}
+
+const seenConflicts = new Map();
+function watchConflicts(state){
+  const live = new Set();
+  for (const c of (state.conflicts || [])){
+    const key = [c.robot_a, c.robot_b, c.cell[0], c.cell[1]].sort().join("|");
+    live.add(key);
+    if (!seenConflicts.has(key)){
+      seenConflicts.set(key, true);
+      logPred(`CONFLICT ${c.robot_a}/${c.robot_b} at (${c.cell[0]},${c.cell[1]}) in ${c.lead_time.toFixed(1)}s`);
+    }
+  }
+  for (const key of [...seenConflicts.keys()]) if (!live.has(key)) seenConflicts.delete(key);
+}
+
+function watchForEvents(prev, now){
+  if (!prev) return;
+  const before = new Map(prev.robots.map(r => [r.robot_id, r]));
+  for (const r of now.robots){
+    const b = before.get(r.robot_id); if (!b) continue;
+    if (b.status !== r.status){
+      if (r.status === "IDLE" && b.status === "MOVING")
+        log(`${r.robot_id} arrived at (${r.cell[0]}, ${r.cell[1]})`);
+      if (r.status === "BLOCKED") log(`${r.robot_id} BLOCKED - no route exists`);
+      if (r.status === "WAITING" && r.blocked_by)
+        log(`${r.robot_id} stopped short - (${r.path[0] ? r.path[0][0]+","+r.path[0][1] : "?"}) is held by ${r.blocked_by}`);
+    }
+  }
+}
+
+function logLine(msg, cls){
+  if (!msg) return;
+  const d = new Date();
+  const t = [d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
+  events.unshift(`<div class="${cls}"><time>${t}</time><span>${msg}</span></div>`);
+  events.length = Math.min(events.length, 16);
+  const el = document.getElementById("log");
+  el.classList.remove("empty"); el.innerHTML = events.join("");
+}
+const logOrder = (m) => logLine(m, "order");
+const logTask  = (m) => logLine(m, "task");
+
+function logFound(msg){
+  if (!msg) return;
+  const d = new Date();
+  const t = [d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
+  events.unshift(`<div class="found"><time>${t}</time><span>${msg}</span></div>`);
+  events.length = Math.min(events.length, 16);
+  const el = document.getElementById("log");
+  el.classList.remove("empty"); el.innerHTML = events.join("");
+}
+
+function logJam(msg){
+  if (!msg) return;
+  const d = new Date();
+  const t = [d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
+  events.unshift(`<div class="jam"><time>${t}</time><span>${msg}</span></div>`);
+  events.length = Math.min(events.length, 16);
+  const el = document.getElementById("log");
+  el.classList.remove("empty"); el.innerHTML = events.join("");
+}
+
+function logGave(msg){
+  if (!msg) return;
+  const d = new Date();
+  const t = [d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
+  events.unshift(`<div class="gave"><time>${t}</time><span>${msg}</span></div>`);
+  events.length = Math.min(events.length, 16);
+  const el = document.getElementById("log");
+  el.classList.remove("empty"); el.innerHTML = events.join("");
+}
+
+function logPred(msg){
+  const d = new Date();
+  const t = [d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
+  events.unshift(`<div class="pred"><time>${t}</time><span>${msg}</span></div>`);
+  events.length = Math.min(events.length, 16);
+  const el = document.getElementById("log");
+  el.classList.remove("empty"); el.innerHTML = events.join("");
+}
+
+function log(msg, crash){
+  if (!msg) return;
+  const d = new Date();
+  const t = [d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
+  events.unshift(`<div class="${crash?"crash":""}"><time>${t}</time><span>${msg}</span></div>`);
+  events.length = Math.min(events.length, 16);
+  const el = document.getElementById("log");
+  el.classList.remove("empty");
+  el.innerHTML = events.join("");
+}
+
+// messages a second, worked out from how fast the total is climbing
+let _rate = {n:0, t:0, v:0};
+function msgRate(total){
+  const now = performance.now();
+  if (!_rate.t){ _rate = {n:total, t:now, v:0}; return 0; }
+  const dt = (now - _rate.t) / 1000;
+  if (dt > 0.75){
+    _rate.v = Math.round((total - _rate.n) / dt);
+    _rate.n = total; _rate.t = now;
+  }
+  return _rate.v;
+}
+
+function fmt(s){
+  const m = Math.floor(s/60), sec = Math.floor(s%60);
+  return `${m}:${String(sec).padStart(2,"0")}`;
+}
+
+boot();
+</script>
+</body>
+</html>
