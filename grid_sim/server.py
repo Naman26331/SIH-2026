@@ -28,12 +28,69 @@ if _SHARED not in sys.path:
     sys.path.insert(0, _SHARED)
 
 from fleetx_core import Cell, World, phase1_world, phase2_world   # noqa: E402
+from comparison import Comparison   # noqa: E402
 from scenarios import Scenarios   # noqa: E402
 
 WEB_DIR = os.path.join(_HERE, "web")
 
 TICK_HZ = 20.0            # how many times a second the world moves
 STREAM_HZ = 20.0          # how many times a second the browser is updated
+
+
+class ComparisonRunner:
+    """Runs BOTH fleets forward on their own thread, in lockstep.
+
+    Completely separate from the single-fleet Simulation above, so the ordinary
+    dashboard keeps working exactly as it did whatever this does.
+    """
+
+    def __init__(self):
+        self.comparison = Comparison(robots=5, every=2.5, seed=1)
+        self.lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="compare", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        dt = 1.0 / TICK_HZ
+        next_tick = time.perf_counter()
+        while not self._stop.is_set():
+            with self.lock:
+                # The speed control just does more steps per real second. The
+                # clock on screen is simulated time either way, so nothing is
+                # being fudged -- it is the same run, watched faster.
+                for _ in range(self.comparison.speed):
+                    self.comparison.tick(dt)
+            next_tick += dt
+            sleep_for = next_tick - time.perf_counter()
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+            else:
+                next_tick = time.perf_counter()
+
+    def snapshot(self) -> dict:
+        with self.lock:
+            return self.comparison.snapshot()
+
+    def command(self, action: str, **kwargs) -> dict:
+        with self.lock:
+            c = self.comparison
+            if action == "start":
+                return {"ok": True, "message": c.start()}
+            if action == "pause":
+                return {"ok": True, "message": c.pause()}
+            if action == "reset":
+                msg = c.reset(robots=kwargs.get("robots"), every=kwargs.get("every"))
+                return {"ok": True, "message": msg}
+            if action == "speed":
+                return {"ok": True, "message": c.set_speed(int(kwargs.get("speed", 1)))}
+            return {"ok": False, "message": f"No such action: {action}"}
 
 
 class Simulation:
@@ -162,6 +219,7 @@ class Handler(BaseHTTPRequestHandler):
     """Answers the browser. Held on the server as `sim`."""
 
     sim: Simulation = None          # type: ignore[assignment]
+    compare: ComparisonRunner = None    # type: ignore[assignment]
     protocol_version = "HTTP/1.1"
 
     # Keep the terminal quiet -- otherwise every frame prints a line.
@@ -173,12 +231,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path in ("/", "/index.html"):
             self._send_file(os.path.join(WEB_DIR, "index.html"), "text/html; charset=utf-8")
+        elif self.path in ("/compare", "/compare.html"):
+            self._send_file(os.path.join(WEB_DIR, "compare.html"), "text/html; charset=utf-8")
+        elif self.path == "/api/compare/stream":
+            self._send_stream(self.compare.snapshot)
         elif self.path == "/api/map":
             self._send_json(self.sim.map_data())
         elif self.path == "/api/state":
             self._send_json(self.sim.snapshot())
         elif self.path == "/api/stream":
-            self._send_stream()
+            self._send_stream(self.sim.snapshot)
         else:
             self._send_json({"error": "not found"}, status=404)
 
@@ -187,14 +249,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path not in ("/api/goal", "/api/scenario", "/api/reset",
                              "/api/silence", "/api/network", "/api/obstacle",
-                             "/api/power"):
+                             "/api/power", "/api/compare"):
             self._send_json({"error": "not found"}, status=404)
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length) or b"{}")
 
-            if self.path == "/api/goal":
+            if self.path == "/api/compare":
+                result = self.compare.command(
+                    body.get("action", "start"),
+                    robots=body.get("robots"), every=body.get("every"),
+                    speed=body.get("speed", 1))
+            elif self.path == "/api/goal":
                 result = self.sim.set_goal(
                     body.get("robot_id", "R1"), body["x"], body["y"]
                 )
@@ -245,7 +312,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_stream(self):
+    def _send_stream(self, source):
         """Server-Sent Events: keep the line open and keep talking.
 
         The browser side of this is one line of JavaScript: new EventSource().
@@ -260,7 +327,7 @@ class Handler(BaseHTTPRequestHandler):
         interval = 1.0 / STREAM_HZ
         try:
             while True:
-                payload = json.dumps(self.sim.snapshot())
+                payload = json.dumps(source())
                 self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                 self.wfile.flush()
                 time.sleep(interval)
@@ -274,7 +341,11 @@ def serve(world: Optional[World] = None, port: int = 8000, host: str = "127.0.0.
     sim = Simulation(world if world is not None else phase2_world())
     sim.start()
 
+    compare = ComparisonRunner()
+    compare.start()
+
     Handler.sim = sim
+    Handler.compare = compare
 
     # If 8000 is busy, walk up until we find a free port.
     server = None
@@ -296,9 +367,10 @@ def serve(world: Optional[World] = None, port: int = 8000, host: str = "127.0.0.
 
     banner = (
         "\n"
-        "  FLEET-X  ---  Part 1, Phase 9: robots bid for real jobs\n"
+        "  FLEET-X  ---  Part 1, Phase 10: dashboard + side-by-side comparison\n"
         "  " + "-" * 58 + "\n"
         f"  Open this in your browser:   {url}\n"
+        f"  Side-by-side comparison:     {url}/compare\n"
         "  Click a robot card to select it, then click a floor square to send it.\n"
         "  Press Ctrl+C here to stop.\n"
     )
@@ -310,4 +382,5 @@ def serve(world: Optional[World] = None, port: int = 8000, host: str = "127.0.0.
         print("\n  Stopping FLEET-X. Bye.\n")
     finally:
         sim.stop()
+        compare.stop()
         server.server_close()

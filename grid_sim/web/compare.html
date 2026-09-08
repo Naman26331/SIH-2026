@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FLEET-X — Side by Side</title>
+<style>
+  :root{
+    --bg:#0A0E13; --panel:#10161F; --panel-2:#141C27; --border:#1E2937;
+    --text:#E4ECF4; --muted:#7A8899; --dim:#4A5768;
+    --cyan:#22D3EE; --green:#34D399; --amber:#F5B841; --red:#F87171; --violet:#A78BFA;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{margin:0;background:var(--bg);color:var(--text);
+    font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;
+    -webkit-font-smoothing:antialiased;overflow:hidden}
+  .app{display:flex;flex-direction:column;height:100vh;min-height:0}
+
+  header{display:flex;align-items:center;gap:18px;padding:11px 20px;
+    background:var(--panel);border-bottom:1px solid var(--border);flex:none}
+  .brand{font-weight:700;letter-spacing:.14em;font-size:13px}
+  .brand span{color:var(--cyan)}
+  .fair{font-size:11px;color:var(--dim);letter-spacing:.02em}
+  .fair b{color:var(--muted);font-weight:500}
+  .clock{margin-left:auto;font-family:var(--mono);font-size:26px;font-weight:600;
+    letter-spacing:.04em;font-variant-numeric:tabular-nums}
+  .clock small{font-size:11px;color:var(--dim);letter-spacing:.1em;display:block;
+    text-align:right;font-weight:400}
+  .live{display:flex;align-items:center;gap:7px;font-size:11px;letter-spacing:.1em;
+    text-transform:uppercase;color:var(--muted);font-family:var(--mono)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--dim)}
+  .live.on .dot{background:var(--green);box-shadow:0 0 0 3px rgba(52,211,153,.15);
+    animation:pulse 2s infinite}
+  .live.on{color:var(--green)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.45}}
+
+  .controls{display:flex;gap:7px;align-items:center}
+  button{font:inherit;font-size:12px;color:var(--text);background:var(--panel-2);
+    border:1px solid var(--border);border-radius:5px;padding:7px 12px;cursor:pointer;
+    transition:.14s;white-space:nowrap}
+  button:hover{background:#1B2431;border-color:var(--cyan);color:var(--cyan)}
+  button.on{border-color:var(--cyan);color:var(--cyan);background:rgba(34,211,238,.12)}
+  button.go{border-color:var(--green);color:var(--green)}
+  .sep{width:1px;height:22px;background:var(--border);margin:0 4px}
+  .lbl{font-size:10px;color:var(--dim);letter-spacing:.09em;text-transform:uppercase}
+
+  main{display:flex;flex:1;min-height:0;gap:1px;background:var(--border)}
+  .side{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--bg)}
+  .side h2{margin:0;padding:12px 18px 0;font-size:12px;letter-spacing:.14em;
+    text-transform:uppercase;font-weight:700}
+  .side .sub{padding:0 18px;font-size:11px;color:var(--dim)}
+  .left h2{color:var(--red)} .right h2{color:var(--green)}
+
+  .big{padding:6px 18px 10px;display:flex;align-items:baseline;gap:14px}
+  .big .n{font-family:var(--mono);font-size:52px;font-weight:700;line-height:1;
+    font-variant-numeric:tabular-nums}
+  .left .n{color:var(--red)} .right .n{color:var(--green)}
+  .big .cap{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+  .big .meta{margin-left:auto;text-align:right;font-family:var(--mono);font-size:11px;
+    color:var(--muted);line-height:1.7}
+  .big .meta b{color:var(--amber)}
+  .big .meta b.ok{color:var(--green)}
+
+  .mapwrap{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;
+    padding:0 14px 12px}
+  canvas{display:block;border-radius:6px}
+
+  footer{flex:none;background:var(--panel);border-top:1px solid var(--border);
+    padding:12px 20px 14px}
+  .bars{display:flex;flex-direction:column;gap:7px}
+  .bar{display:flex;align-items:center;gap:12px}
+  .bar .name{width:112px;flex:none;font-size:11px;letter-spacing:.08em;
+    text-transform:uppercase;color:var(--muted);text-align:right}
+  .bar .track{flex:1;height:22px;background:#0D1319;border-radius:4px;overflow:hidden;
+    border:1px solid var(--border)}
+  .bar .fill{height:100%;border-radius:3px;transition:width .35s ease}
+  .bar.l .fill{background:linear-gradient(90deg,#7F1D1D,#F87171)}
+  .bar.r .fill{background:linear-gradient(90deg,#166534,#34D399)}
+  .bar .v{width:52px;flex:none;font-family:var(--mono);font-size:17px;font-weight:700;
+    font-variant-numeric:tabular-nums}
+  .bar.l .v{color:var(--red)} .bar.r .v{color:var(--green)}
+  .verdict{margin-top:9px;font-size:12px;color:var(--muted);display:flex;gap:16px;align-items:center}
+  .verdict b{color:var(--green);font-family:var(--mono);font-size:15px}
+  .verdict .warn{color:var(--amber)}
+
+  @media (max-width:1000px){ main{flex-direction:column} .big .n{font-size:34px} }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <header>
+    <div>
+      <div class="brand">FLEET&#8209;<span>X</span> &nbsp;·&nbsp; SIDE BY SIDE</div>
+      <div class="fair">
+        <b>same warehouse</b> · <b>same orders, same instant</b> ·
+        <b>same start positions</b> · <b>same A*</b> · <b>same safety reflex</b>
+        &nbsp;— the only difference is the coordination
+      </div>
+    </div>
+
+    <div class="controls">
+      <button id="go" class="go">Start</button>
+      <button id="reset">Reset</button>
+      <div class="sep"></div>
+      <span class="lbl">robots</span>
+      <button class="rb" data-robots="3">3</button>
+      <button class="rb" data-robots="5">5</button>
+      <button class="rb" data-robots="10">10</button>
+      <div class="sep"></div>
+      <span class="lbl">speed</span>
+      <button class="sb" data-speed="1">1&times;</button>
+      <button class="sb" data-speed="2">2&times;</button>
+      <button class="sb" data-speed="4">4&times;</button>
+    </div>
+
+    <div class="clock"><span id="clock">0:00</span><small id="offered">0 orders given out</small></div>
+    <div class="live off" id="live"><i class="dot"></i><span id="liveTxt">connecting</span></div>
+  </header>
+
+  <main>
+    <div class="side left">
+      <h2>Stop&#8209;and&#8209;wait</h2>
+      <div class="sub">the conventional way: see a robot, stop</div>
+      <div class="big">
+        <span class="n" id="lDone">0</span>
+        <span class="cap">orders<br>delivered</span>
+        <span class="meta">
+          jammed <b id="lJam">0</b><br>
+          waiting <b id="lWait">0s</b><br>
+          collisions <b class="ok" id="lCol">0</b>
+        </span>
+      </div>
+      <div class="mapwrap"><canvas id="cvL"></canvas></div>
+    </div>
+
+    <div class="side right">
+      <h2>FLEET&#8209;X</h2>
+      <div class="sub">books squares, gives way, breaks its own jams</div>
+      <div class="big">
+        <span class="n" id="rDone">0</span>
+        <span class="cap">orders<br>delivered</span>
+        <span class="meta">
+          jammed <b id="rJam">0</b><br>
+          waiting <b id="rWait">0s</b><br>
+          collisions <b class="ok" id="rCol">0</b>
+        </span>
+      </div>
+      <div class="mapwrap"><canvas id="cvR"></canvas></div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="bars">
+      <div class="bar l">
+        <span class="name">stop&#8209;and&#8209;wait</span>
+        <span class="track"><i class="fill" id="barL" style="width:0%"></i></span>
+        <span class="v" id="barLv">0</span>
+      </div>
+      <div class="bar r">
+        <span class="name">FLEET&#8209;X</span>
+        <span class="track"><i class="fill" id="barR" style="width:0%"></i></span>
+        <span class="v" id="barRv">0</span>
+      </div>
+    </div>
+    <div class="verdict">
+      <span id="verdict">Press Start. Both fleets get the same orders at the same moment.</span>
+      <span id="sync" style="margin-left:auto"></span>
+    </div>
+  </footer>
+</div>
+
+<script>
+"use strict";
+const C = {floor:"#0D1319", shelf:"#1B2531", shelfTop:"#232F3E", grid:"#131B24",
+           pick:"#1B3A2E", drop:"#123240", dropE:"#1E6480", chg:"#3A2E12",
+           red:"#F87171", green:"#34D399", amber:"#F5B841", muted:"#7A8899"};
+
+let MAP=null, STATE=null, CELL=14;
+const cvL=document.getElementById("cvL"), cvR=document.getElementById("cvR");
+const ctxL=cvL.getContext("2d"), ctxR=cvR.getContext("2d");
+
+async function boot(){
+  MAP = await (await fetch("/api/map")).json();
+  layout();
+  connect();
+  requestAnimationFrame(draw);
+}
+window.addEventListener("resize", () => { if (MAP) layout(); });
+
+function layout(){
+  const wrap = cvL.parentElement;
+  const w = wrap.clientWidth - 8, h = wrap.clientHeight - 8;
+  CELL = Math.max(6, Math.floor(Math.min(w/MAP.width, h/MAP.height)));
+  const dpr = window.devicePixelRatio || 1;
+  for (const cv of [cvL, cvR]){
+    cv.width = MAP.width*CELL*dpr; cv.height = MAP.height*CELL*dpr;
+    cv.style.width = MAP.width*CELL+"px"; cv.style.height = MAP.height*CELL+"px";
+    cv.getContext("2d").setTransform(dpr,0,0,dpr,0,0);
+  }
+}
+
+function connect(){
+  const es = new EventSource("/api/compare/stream");
+  es.onopen = () => setLive(true);
+  es.onerror = () => setLive(false);
+  es.onmessage = e => { STATE = JSON.parse(e.data); setLive(true); render(); };
+}
+function setLive(on){
+  const el=document.getElementById("live");
+  el.className = "live "+(on?"on":"off");
+  document.getElementById("liveTxt").textContent = on?"live":"disconnected";
+}
+
+function drawMap(ctx){
+  const W=MAP.width*CELL, H=MAP.height*CELL;
+  ctx.fillStyle=C.floor; ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle=C.grid; ctx.lineWidth=1; ctx.beginPath();
+  for(let x=0;x<=MAP.width;x++){ctx.moveTo(x*CELL+.5,0);ctx.lineTo(x*CELL+.5,H);}
+  for(let y=0;y<=MAP.height;y++){ctx.moveTo(0,y*CELL+.5);ctx.lineTo(W,y*CELL+.5);}
+  ctx.stroke();
+  for(let y=0;y<MAP.height;y++)for(let x=0;x<MAP.width;x++){
+    const k=MAP.cells[y][x]; if(k==="FLOOR")continue;
+    const px=x*CELL, py=y*CELL;
+    if(k==="SHELF"){
+      ctx.fillStyle=C.shelf; ctx.fillRect(px+1,py+1,CELL-2,CELL-2);
+      ctx.fillStyle=C.shelfTop; ctx.fillRect(px+1,py+1,CELL-2,Math.max(1,CELL*0.16));
+    }else{
+      ctx.fillStyle = k==="PICK"?C.pick : k==="DROP"?C.drop : C.chg;
+      ctx.fillRect(px+1,py+1,CELL-2,CELL-2);
+      if(k==="DROP"){ ctx.strokeStyle=C.dropE; ctx.lineWidth=1;
+        ctx.strokeRect(px+1.5,py+1.5,CELL-3,CELL-3); }
+    }
+  }
+}
+
+const NOSE={N:[0,-1],E:[1,0],S:[0,1],W:[-1,0]};
+function drawSide(ctx, side, tint){
+  drawMap(ctx);
+  for(const [gx,gy] of (side.goals||[])){
+    ctx.save(); ctx.globalAlpha=.5; ctx.strokeStyle=tint; ctx.lineWidth=1.5;
+    ctx.strokeRect(gx*CELL+2, gy*CELL+2, CELL-4, CELL-4); ctx.restore();
+  }
+  for(const r of side.robots){
+    const cx=r.x*CELL+CELL/2, cy=r.y*CELL+CELL/2, rad=CELL*0.36;
+    const stuck = r.status==="WAITING"||r.status==="BLOCKED";
+    const col = stuck ? C.amber : tint;
+    ctx.save();
+    ctx.globalAlpha=.18; ctx.fillStyle=col;
+    ctx.beginPath(); ctx.arc(cx,cy,rad*1.9,0,Math.PI*2); ctx.fill();
+    ctx.globalAlpha=1; ctx.fillStyle=r.carrying?col:"#0A0E13";
+    ctx.beginPath(); ctx.arc(cx,cy,rad,0,Math.PI*2); ctx.fill();
+    ctx.strokeStyle=col; ctx.lineWidth=Math.max(1.5,CELL*0.11);
+    ctx.beginPath(); ctx.arc(cx,cy,rad,0,Math.PI*2); ctx.stroke();
+    const d=NOSE[r.heading]||NOSE.E;
+    ctx.fillStyle=r.carrying?"#0A0E13":col;
+    ctx.beginPath();
+    ctx.arc(cx+d[0]*rad*0.66, cy+d[1]*rad*0.66, Math.max(1,CELL*0.09),0,Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function draw(){
+  if(MAP && STATE){ drawSide(ctxL, STATE.left, C.red); drawSide(ctxR, STATE.right, C.green); }
+  requestAnimationFrame(draw);
+}
+
+function fmt(s){const m=Math.floor(s/60);return `${m}:${String(Math.floor(s%60)).padStart(2,"0")}`;}
+
+function render(){
+  const L=STATE.left, R=STATE.right;
+  document.getElementById("clock").textContent = fmt(STATE.sim_time);
+  document.getElementById("offered").textContent =
+    `${STATE.orders_offered} orders given to both`;
+  document.getElementById("lDone").textContent = L.delivered;
+  document.getElementById("rDone").textContent = R.delivered;
+  document.getElementById("lJam").textContent = L.jammed;
+  document.getElementById("rJam").textContent = R.jammed;
+  document.getElementById("lWait").textContent = L.waiting+"s";
+  document.getElementById("rWait").textContent = R.waiting+"s";
+  document.getElementById("lCol").textContent = L.collisions;
+  document.getElementById("rCol").textContent = R.collisions;
+  document.getElementById("lCol").className = L.collisions?"":"ok";
+  document.getElementById("rCol").className = R.collisions?"":"ok";
+
+  const top = Math.max(L.delivered, R.delivered, 1);
+  document.getElementById("barL").style.width = (L.delivered/top*100)+"%";
+  document.getElementById("barR").style.width = (R.delivered/top*100)+"%";
+  document.getElementById("barLv").textContent = L.delivered;
+  document.getElementById("barRv").textContent = R.delivered;
+
+  const v = document.getElementById("verdict");
+  if(!STATE.running && STATE.orders_offered===0){
+    v.textContent = "Press Start. Both fleets get the same orders at the same moment.";
+  } else if(STATE.ahead && STATE.ahead > 1){
+    v.innerHTML = `FLEET&#8209;X has delivered <b>${STATE.ahead}&times;</b> more `
+      + `of the same ${STATE.orders_offered} orders`
+      + (L.jammed ? ` &nbsp;·&nbsp; <span class="warn">${L.jammed} robot(s) jammed on the left</span>` : "");
+  } else {
+    v.textContent = `${STATE.orders_offered} orders given to both fleets — watch the gap open.`;
+  }
+  document.getElementById("sync").innerHTML = STATE.in_step
+    ? '<span style="color:var(--dim)">clocks in step &#10003;</span>' : "";
+
+  document.getElementById("go").textContent = STATE.running ? "Pause" : "Start";
+  document.getElementById("go").className = STATE.running ? "" : "go";
+  document.querySelectorAll(".sb").forEach(b =>
+    b.classList.toggle("on", +b.dataset.speed === STATE.speed));
+  document.querySelectorAll(".rb").forEach(b =>
+    b.classList.toggle("on", +b.dataset.robots === STATE.robots_each));
+}
+
+async function cmd(body){
+  await fetch("/api/compare", {method:"POST",
+    headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)});
+}
+document.getElementById("go").addEventListener("click",
+  () => cmd({action: STATE && STATE.running ? "pause" : "start"}));
+document.getElementById("reset").addEventListener("click", () => cmd({action:"reset"}));
+document.querySelectorAll(".sb").forEach(b =>
+  b.addEventListener("click", () => cmd({action:"speed", speed:+b.dataset.speed})));
+document.querySelectorAll(".rb").forEach(b =>
+  b.addEventListener("click", async () => {
+    await cmd({action:"reset", robots:+b.dataset.robots});
+    await cmd({action:"start"});
+  }));
+
+boot();
+</script>
+</body>
+</html>
