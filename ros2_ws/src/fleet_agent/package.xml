@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://relaxng.org/ns/structure/1.0"?>
+<package format="3">
+  <name>fleet_agent</name>
+  <version>0.1.0</version>
+  <description>
+    One FLEET-X robot, as a ROS 2 node.
+
+    This package contains NO coordination logic. Every decision -- routing,
+    booking squares, giving way, breaking deadlocks, bidding for jobs -- comes
+    from shared/fleetx_core, the same code the laptop simulator runs. This is
+    the wrapper that feeds it real sensors and drives real wheels.
+  </description>
+  <maintainer email="fleetx@example.com">FLEET-X team</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>fleet_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>builtin_interfaces</exec_depend>
+  <exec_depend>nav2_msgs</exec_depend>
+  <exec_depend>tf_transformations</exec_depend>
+
+  <test_depend>ament_copyright</test_depend>
+  <test_depend>ament_flake8</test_depend>
+  <test_depend>ament_pep257</test_depend>
+  <test_depend>python3-pytest</test_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

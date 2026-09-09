@@ -30,7 +30,7 @@ Phases come from `10_DEVELOPMENT_ROADMAP.md`.
 | 7 | Deadlock detection and recovery | Done |
 | 8 | Dynamic obstacles / blocked aisles | Done |
 | 9 | Task allocation (auction, reassignment) | Done |
-| 10 | Dashboard | Not started |
+| 10 | Dashboard | Done |
 | 11 | Inventory intelligence | Not started |
 | 12 | Demand prediction | Not started |
 | 13 | Battery and charging | Not started |
@@ -158,6 +158,73 @@ _(Newest entry first.)_
   folder. Open the `.pptx` if you want to edit anything.
 - **Still to fill in:** Slide 1 says `<Team ID from SIH portal>` — replace it
   with the real Team ID before uploading.
+
+### 2026-09-09 — Phase 10: the dashboard, and the side-by-side screen
+
+- **What:** Built the comparison screen from 07_DASHBOARD §9 — both fleets
+  running the SAME orders at the same time, live, so a judge watches
+  stop-and-wait jam up while ours keeps flowing.
+
+  - `grid_sim/comparison.py` — NEW. Runs both fleets in lockstep.
+  - `grid_sim/web/compare.html` — NEW. The screen, at `/compare`.
+  - `grid_sim/server.py` — three small routes added. The existing dashboard
+    was NOT touched.
+  - `tests/test_phase10.py` — NEW, 16 tests, almost all about fairness rather
+    than about pictures.
+
+- **How the fairness claim is made honest.** Each order is created ONCE and
+  handed to both fleets on the same tick. The obvious alternative — two order
+  generators started from the same seed — would also match today, but it relies
+  on two random sequences staying in step for ever, and that is a claim a judge
+  would be right to poke at. Here there is nothing to drift from. The screen
+  also shows a live "clocks in step" tick, and the header states the whole
+  claim: same warehouse, same orders same instant, same start positions, same
+  A*, same safety reflex — the only difference is the coordination.
+
+- **Measured live, 10 robots a side, one order every 2s:**
+
+      t=  35s   S&W  4  |  FLEET-X 14   gap 3.5x
+      t=  71s   S&W  8  |  FLEET-X 31   gap 3.9x
+      t= 145s   S&W  8  |  FLEET-X 63   gap 7.9x
+      collisions 0/0 throughout, clocks in step throughout
+
+  Stop-and-wait flatlines at 8 delivered and never recovers. That is the
+  moment the project explains itself without anybody saying anything.
+
+- **How to see it:** `python3 grid_sim/run.py`, then
+  http://localhost:8000/compare  (the ordinary dashboard is still at `/`).
+  Controls: Start/Pause, Reset, robots 3/5/10, speed 1x/2x/4x. The speed
+  control only does more steps per real second — the clock on screen is
+  simulated time either way, so nothing is being fudged.
+
+- **A BUG I WROTE, AND THE LESSON: a test that can hang is worse than a test
+  that fails.**
+
+  I wrote a test helper that loops until the simulated clock reaches a target:
+
+      while c.left.sim_time < target:
+          c.tick(dt)
+
+  But `tick()` deliberately does nothing while the comparison is PAUSED, so the
+  clock never moves and the loop never ends. And one of my own tests —
+  `test_nothing_happens_until_you_press_start` — is specifically about the
+  paused state. It burned **87 minutes at 100% CPU** before anyone noticed, and
+  it was only caught because Anushka asked me to stop the web server and I
+  looked at what else was running.
+
+  A failing test tells you something. A hanging test just quietly eats the
+  laptop, and I had reported it as "running in the background" for over an hour
+  without checking on it.
+
+  Two fixes: that test now steps a FIXED number of ticks instead of waiting on
+  a clock that cannot move, and the helper has a hard iteration cap so nothing
+  in that file can hang for ever again.
+
+- 251 of 251 tests pass (16 new). Purity guard clean. Nothing in
+  `shared/fleetx_core/` was touched, so every number already proven is
+  unaffected.
+
+---
 
 ### 2026-09-08 — Layout fix: spread the packing stations (cleanup item 2)
 

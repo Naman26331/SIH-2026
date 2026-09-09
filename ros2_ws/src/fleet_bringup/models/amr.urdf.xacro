@@ -1,0 +1,150 @@
+<?xml version="1.0"?>
+<!--
+  A deliberately plain differential-drive robot: two wheels, a caster, a laser.
+
+  09_EDGE_HARDWARE section 6: "Do not make the physical robot more complex than
+  necessary." This is the simulated twin of that advice. Everything interesting
+  in FLEET-X happens in the brain, not in the chassis.
+-->
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="amr">
+
+  <xacro:arg name="robot_id" default="R1"/>
+  <xacro:property name="body_x" value="0.42"/>
+  <xacro:property name="body_y" value="0.36"/>
+  <xacro:property name="body_z" value="0.18"/>
+  <xacro:property name="wheel_r" value="0.075"/>
+  <xacro:property name="wheel_w" value="0.04"/>
+  <xacro:property name="separation" value="0.34"/>
+
+  <link name="base_footprint"/>
+
+  <link name="base_link">
+    <visual>
+      <geometry><box size="${body_x} ${body_y} ${body_z}"/></geometry>
+      <material name="body"><color rgba="0.13 0.83 0.93 1"/></material>
+    </visual>
+    <collision>
+      <geometry><box size="${body_x} ${body_y} ${body_z}"/></geometry>
+    </collision>
+    <inertial>
+      <mass value="8.0"/>
+      <inertia ixx="0.12" ixy="0" ixz="0" iyy="0.16" iyz="0" izz="0.20"/>
+    </inertial>
+  </link>
+
+  <joint name="base_joint" type="fixed">
+    <parent link="base_footprint"/>
+    <child link="base_link"/>
+    <origin xyz="0 0 ${wheel_r + body_z/2}"/>
+  </joint>
+
+  <xacro:macro name="wheel" params="name side">
+    <link name="${name}">
+      <visual>
+        <origin rpy="1.5708 0 0"/>
+        <geometry><cylinder radius="${wheel_r}" length="${wheel_w}"/></geometry>
+        <material name="tyre"><color rgba="0.1 0.1 0.12 1"/></material>
+      </visual>
+      <collision>
+        <origin rpy="1.5708 0 0"/>
+        <geometry><cylinder radius="${wheel_r}" length="${wheel_w}"/></geometry>
+      </collision>
+      <inertial>
+        <mass value="0.6"/>
+        <inertia ixx="0.002" ixy="0" ixz="0" iyy="0.002" iyz="0" izz="0.003"/>
+      </inertial>
+    </link>
+    <joint name="${name}_joint" type="continuous">
+      <parent link="base_link"/>
+      <child link="${name}"/>
+      <origin xyz="0 ${side * separation/2} ${-body_z/2}"/>
+      <axis xyz="0 1 0"/>
+    </joint>
+  </xacro:macro>
+
+  <xacro:wheel name="left_wheel" side="1"/>
+  <xacro:wheel name="right_wheel" side="-1"/>
+
+  <link name="caster">
+    <visual><geometry><sphere radius="0.03"/></geometry></visual>
+    <collision>
+      <geometry><sphere radius="0.03"/></geometry>
+      <surface><friction><ode><mu>0.0</mu><mu2>0.0</mu2></ode></friction></surface>
+    </collision>
+    <inertial><mass value="0.2"/>
+      <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
+    </inertial>
+  </link>
+  <joint name="caster_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="caster"/>
+    <origin xyz="${body_x/2 - 0.05} 0 ${-body_z/2 - wheel_r + 0.03}"/>
+  </joint>
+
+  <link name="laser">
+    <visual>
+      <geometry><cylinder radius="0.035" length="0.05"/></geometry>
+      <material name="laser"><color rgba="0.9 0.2 0.2 1"/></material>
+    </visual>
+    <inertial><mass value="0.1"/>
+      <inertia ixx="0.0001" ixy="0" ixz="0" iyy="0.0001" iyz="0" izz="0.0001"/>
+    </inertial>
+  </link>
+  <joint name="laser_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="laser"/>
+    <origin xyz="${body_x/2 - 0.06} 0 ${body_z/2 + 0.03}"/>
+  </joint>
+
+  <!-- ================= Gazebo plugins ================= -->
+
+  <gazebo reference="left_wheel"><mu1>1.0</mu1><mu2>1.0</mu2></gazebo>
+  <gazebo reference="right_wheel"><mu1>1.0</mu1><mu2>1.0</mu2></gazebo>
+  <gazebo reference="caster"><mu1>0.0</mu1><mu2>0.0</mu2></gazebo>
+
+  <gazebo>
+    <plugin name="diff_drive" filename="libgazebo_ros_diff_drive.so">
+      <ros>
+        <namespace>/$(arg robot_id)</namespace>
+        <remapping>cmd_vel:=cmd_vel</remapping>
+        <remapping>odom:=odom</remapping>
+      </ros>
+      <left_joint>left_wheel_joint</left_joint>
+      <right_joint>right_wheel_joint</right_joint>
+      <wheel_separation>${separation}</wheel_separation>
+      <wheel_diameter>${2 * wheel_r}</wheel_diameter>
+      <max_wheel_torque>12.0</max_wheel_torque>
+      <max_wheel_acceleration>1.5</max_wheel_acceleration>
+      <publish_odom>true</publish_odom>
+      <publish_odom_tf>true</publish_odom_tf>
+      <publish_wheel_tf>true</publish_wheel_tf>
+      <odometry_frame>$(arg robot_id)/odom</odometry_frame>
+      <robot_base_frame>$(arg robot_id)/base_footprint</robot_base_frame>
+      <update_rate>30</update_rate>
+    </plugin>
+  </gazebo>
+
+  <gazebo reference="laser">
+    <sensor name="lidar" type="ray">
+      <pose>0 0 0 0 0 0</pose>
+      <always_on>true</always_on>
+      <update_rate>10</update_rate>
+      <ray>
+        <scan><horizontal>
+          <samples>180</samples><resolution>1</resolution>
+          <min_angle>-3.14159</min_angle><max_angle>3.14159</max_angle>
+        </horizontal></scan>
+        <range><min>0.15</min><max>6.0</max><resolution>0.02</resolution></range>
+      </ray>
+      <plugin name="laser_plugin" filename="libgazebo_ros_ray_sensor.so">
+        <ros>
+          <namespace>/$(arg robot_id)</namespace>
+          <remapping>~/out:=scan</remapping>
+        </ros>
+        <output_type>sensor_msgs/LaserScan</output_type>
+        <frame_name>$(arg robot_id)/laser</frame_name>
+      </plugin>
+    </sensor>
+  </gazebo>
+
+</robot>

@@ -19,9 +19,21 @@ from comparison import LEFT, RIGHT, Comparison
 
 
 def run(c, seconds, dt=0.05):
-    target = c.left.sim_time + seconds
-    while c.left.sim_time < target:
+    """Step the comparison forward.
+
+    Note the guard. tick() does nothing while the comparison is paused, so a
+    plain "while sim_time < target" loop never finishes if nobody pressed
+    Start -- which is exactly what one of the tests below is checking. That
+    hung the whole suite for 87 minutes before it was noticed. A test that can
+    hang forever is worse than a test that fails.
+    """
+    steps = int(seconds / dt)
+    for _ in range(steps + 10):
         c.tick(dt)
+        if c.left.sim_time >= steps * dt:
+            return
+    if c.running:
+        raise AssertionError("comparison did not advance while running")
 
 
 class TestItIsAFairFight(unittest.TestCase):
@@ -106,10 +118,14 @@ class TestTheStoryItTells(unittest.TestCase):
                            f"only {s['right']['delivered']} vs {s['left']['delivered']}")
 
     def test_nothing_happens_until_you_press_start(self):
+        """A fixed number of ticks, NOT a run-until-the-clock-reaches-N loop.
+        Paused means the clock never moves, so that loop would never end."""
         c = Comparison(robots=5, every=2.5, seed=1)
-        run(c, 30)
+        for _ in range(600):
+            c.tick(0.05)
         self.assertEqual(c.orders_offered, 0)
         self.assertEqual(len(c.left.board), 0)
+        self.assertEqual(c.left.sim_time, 0.0)
 
     def test_pause_stops_both(self):
         c = Comparison(robots=5, every=2.5, seed=1)

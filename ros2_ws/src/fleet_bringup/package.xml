@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://relaxng.org/ns/structure/1.0"?>
+<package format="3">
+  <name>fleet_bringup</name>
+  <version>0.1.0</version>
+  <description>
+    The warehouse itself: a Gazebo world and a Nav2 map, both generated from
+    the SAME grid the brain uses (shared/fleetx_core/grid.py). Generated, not
+    hand-drawn, so the simulated warehouse and the one the robots believe in
+    cannot drift apart.
+  </description>
+  <maintainer email="fleetx@example.com">FLEET-X team</maintainer>
+  <license>MIT</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <exec_depend>fleet_agent</exec_depend>
+  <exec_depend>gazebo_ros</exec_depend>
+  <exec_depend>gazebo_ros_pkgs</exec_depend>
+  <exec_depend>nav2_bringup</exec_depend>
+  <exec_depend>robot_state_publisher</exec_depend>
+  <exec_depend>xacro</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
