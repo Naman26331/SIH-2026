@@ -15,11 +15,15 @@ from .conflicts import (DEFAULT_CLEARANCE, DEFAULT_HORIZON, Conflict, ConflictKi
                         Plan, Window, build_plan, find_conflicts)
 from .deadlock import (STUCK_SECONDS, WaitForGraph, Waiting, choose_victim)
 from .fleet_view import DEFAULT_STALE_AFTER, FleetView, Neighbour
-from .messages import (BlockedAisle, ConflictAlert, Heartbeat, IntentUpdate,
-                       MessageType, PathReservation, PoseUpdate, TaskAnnounce,
-                       TaskBid, TaskClaim, WaitReport, YieldRequest, from_dict)
+from .messages import (BlockedAisle, CentralCommand, ConflictAlert, Heartbeat,
+                       IntentUpdate, MessageType, PathReservation, PoseUpdate,
+                       TaskAnnounce, TaskBid, TaskClaim, WaitReport,
+                       YieldRequest, from_dict)
 from .grid import Cell, CellKind, Grid, default_grid
+from .central import CentralPlanner
+from .humans import Human
 from .inventory import CATALOGUE, Inventory, Shelf
+from .slotting import Reslotter, SlotMove
 from .obstacles import (DEFAULT_TTL, SENSOR_RANGE, Block, BlockedMap,
                         within_range)
 from .priority import (BASE_PRIORITY, DOMINANCE_MARGIN, as_points,
@@ -30,11 +34,12 @@ from .reservations import (DEFAULT_LOOKAHEAD, OCCUPANCY_PRIORITY, Reservation,
 from .robot import Robot, RobotStatus
 from .tasks import (BID_WINDOW, Task, TaskBoard, TaskStatus, auction_winner,
                     bid_cost, bid_rank)
-from .world import (COLLISION_DISTANCE, World, fleet_world, phase1_world,
-                    phase2_world)
+from .world import (COLLISION_DISTANCE, GEOMETRY_SAFE_GAP, World, fleet_world,
+                    phase1_world, phase2_world)
 
 __all__ = [
-    "Inventory", "Shelf", "CATALOGUE",
+    "Inventory", "Shelf", "CATALOGUE", "Human", "CentralCommand",
+    "CentralPlanner", "Reslotter", "SlotMove",
     "Cell", "CellKind", "Grid", "default_grid",
     "find_path", "manhattan", "uniform_cost",
     "Robot", "RobotStatus",
@@ -55,4 +60,5 @@ __all__ = [
     "BlockedMap", "Block", "within_range", "SENSOR_RANGE", "DEFAULT_TTL",
     "DEFAULT_HORIZON", "DEFAULT_CLEARANCE",
     "World", "phase1_world", "phase2_world", "fleet_world", "COLLISION_DISTANCE",
+    "GEOMETRY_SAFE_GAP",
 ]

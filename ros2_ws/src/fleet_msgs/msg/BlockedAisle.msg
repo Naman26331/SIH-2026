@@ -8,6 +8,7 @@
 string robot_id
 builtin_interfaces/Time stamp
 uint32 seq
+string tag                  # Phase 23: HMAC signature -- see security.py
 
 int32[2] cell
 float64 confidence

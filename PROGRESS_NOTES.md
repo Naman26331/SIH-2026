@@ -73,6 +73,634 @@ never made-up ones.
 
 _(Newest entry first.)_
 
+### 2026-09-11 (later again) — Phase 21: moving inventory
+
+- **What:** the warehouse learns which PRODUCTS actually sell, and moves the
+  best ones closer to packing -- explainably, and only when it can actually
+  help.
+
+  **`shared/fleetx_core/slotting.py` (new)** — `Reslotter`. Reuses Phase 12's
+  own `DemandModel` completely unchanged, just keyed by product name instead
+  of aisle letter (it was already generic over whatever string you feed it).
+  Every `RESLOT_EVERY` (20s), it asks the model for the clear winner --
+  exactly Phase 12's own "no idea" gate, so a handful of orders can never
+  trigger a move -- and if that product's worst-placed shelf is not already
+  about as close to packing as any shelf gets (`ALREADY_CLOSE`), it trades
+  places with a shelf that already sits close but is not selling much
+  (never a shelf selling MORE, so this can't just shuffle two winners), as
+  long as the gain clears `MIN_GAIN` squares. Only `Shelf.product` and
+  `Shelf.stock` on the two racks ever change -- `Shelf.cell`/`Shelf.face`
+  never move, because a rack is bolted to the floor; only the label on it
+  does.
+
+  **The bug that would have made this do nothing:** the first version only
+  did the swap and measured a bit-for-bit IDENTICAL total distance driven
+  before and after enabling it. Root cause: `OrderGenerator.tick()` picks a
+  shelf FIRST (by hot aisle or randomly) and only THEN reports whatever
+  product happens to sit on it -- so relabelling a shelf's product can never
+  change which shelf a future order visits, since shelf choice never
+  consulted the product at all. Fixed with the other half re-slotting
+  actually needs: when enabled, `OrderGenerator.tick()` now resolves the
+  chosen shelf's PRODUCT to whichever current holder of that same product is
+  closest to packing (`Reslotter.best_shelf_for()`), exactly the way a real
+  picker checks the nearest bin with the SKU they need rather than walking to
+  the one they thought of first. Stock is taken from, and the task names,
+  that resolved shelf -- not the original one -- so the Phase 11 invariant
+  ("the shelf named is the shelf actually visited") still holds under
+  redirect.
+
+  **Off by default, everywhere except the live dashboard.** Enabling this
+  changes which square an order actually collects from, which every
+  existing benchmark and test in this project was written against -- the
+  same reasoning that made Phase 18's `coordination="CENTRAL"` opt-in.
+  `World.reslotting_enabled` gates BOTH the learning (`announce_task()`) and
+  the acting (`tick()`); `grid_sim/server.py`'s `serve()` turns it on for the
+  one place a judge should actually see it happen.
+
+  **`grid_sim/scenarios.py`** — the redirect above, four lines, gated behind
+  the same flag.
+
+  **`grid_sim/web/index.html`** — a new "Stock, moving itself closer" panel,
+  built the same way the existing "Where the work is" (Phase 12 demand)
+  panel already is: a one-line summary plus the checkable numbers behind it,
+  not a black box. Each move also gets its own colour (`slot`, amber) in the
+  big event log instead of falling through to "gave way", and
+  `SHELF_BY_NAME` + `watchReslotting()` patch the SAME shelf objects a hover
+  already reads from, so a rack's tooltip never shows a product it stopped
+  holding minutes ago.
+
+- **Why:** a warehouse that never rearranges itself is leaving a real,
+  measurable amount of driving on the table -- the same reason a supermarket
+  puts milk near the door. "Keep it explainable" and "if it can't help, it
+  does nothing" both come straight from Phase 12's own already-proven
+  pattern: reuse the model that already answers "is this actually worth
+  acting on," rather than inventing a second, unverified one.
+
+- **Milestone:** Phase 21.
+
+- **How to see it:**
+  ```
+  python3 -m unittest tests.test_phase21 -v
+  python3 tools/check_purity.py
+  python3 grid_sim/run.py
+  ```
+  Open the dashboard, press "Start orders", and watch the "Stock, moving
+  itself closer" panel -- the first move typically lands within the first
+  20-40 seconds.
+
+- **Results measured (real numbers, nothing massaged):**
+  - New test suite: 14 of 14 pass, including the actual claim.
+  - Full suite (`python3 -m unittest discover -s tests`): 408 before this
+    phase, plus 14 new — 0 failures.
+  - `tools/final_table.py` re-run (smoke scope, scratch CSV): identical
+    numbers to before this phase (13.0 orders, 1.000 squares closest
+    approach, 0.1250 biggest single-tick move) — `reslotting_enabled`
+    defaults to False, so the official benchmark is provably untouched.
+  - The actual claim, same seed, only the flag different, 400s of orders,
+    5 robots: **reslotting off** → 331 orders delivered, 8377 total squares
+    driven (25.31 sq/order). **reslotting on** → 415 orders delivered, 8392
+    total squares driven (20.22 sq/order) — roughly 20% less driving per
+    delivered order, for essentially the SAME amount of driving overall.
+  - Collisions: **0**, off or on, every run.
+  - Live-server check: first re-slot fired at t=20.0s (the first
+    `RESLOT_EVERY` checkpoint), moved Speaker from shelf C7 (14 squares from
+    packing) to shelf A29 (1 square), correctly explained in both the
+    dedicated panel's data and the decisions feed.
+
+- **Decisions worth remembering:**
+  - A move needs a REAL geometric effect to mean anything, which needs the
+    order-generation side to be product-aware too -- swapping labels alone
+    was invisible to every order that never asked "where does this SKU live
+    right now." Any future "the model decided X" feature in this project
+    should check, the same way this one was caught doing wrong, that
+    something downstream actually CONSULTS the decision, not just that the
+    decision gets made.
+  - `DemandModel.predict()`'s lift is relative to the average of everything
+    ever recorded -- recording only ONE key forever trivially ties the
+    average (lift == 1.0) and never looks interesting. Test fixtures for
+    anything built on this model need at least a second, quieter key
+    recorded too, or "no idea" is the only answer they will ever get.
+  - Killed a stale dev-server process left over from earlier in this same
+    session (port 8000, running code from before this phase existed) while
+    checking the dashboard by hand -- a reminder that "server didn't pick up
+    the change" is worth checking for a leftover process before it is
+    debugged as a code bug.
+
+---
+
+### 2026-09-11 (even later still) — Phase 19: the geometry safety layer
+
+- **What:** a second, finer collision check UNDER square booking, so two
+  robots also stay smoothly apart in the open floor, not just at grid
+  points.
+
+  **`shared/fleetx_core/world.py`** — new `GEOMETRY_SAFE_GAP = 0.9` constant
+  and `World._enforce_geometry_gap()`. Square booking only reasons about
+  which NODE or EDGE a robot holds. It has nothing to say about the space
+  near a shared corner, where two robots each transiting a DIFFERENT edge
+  that happens to meet at the same node can swing closer to each other than
+  either edge or node reservation alone would ever catch — neither is
+  entering the other's booked resource, so nothing upstream has any reason
+  to stop them. This new check runs on every robot's actual `(x, y)`,
+  ground truth, never a message, so it works identically whichever
+  coordination mode is active, and just as well with no radio at all. It is
+  called once per tick, at the END of each of the three real coordination
+  branches (FLEET-X, stop-and-wait, central) — right after that mode's own
+  safety machinery decides who moves and right before anyone actually does,
+  the literal meaning of "sits under the existing square booking."
+
+  **Found by the full gate, not by inspection:** the first version called it
+  once, unconditionally, after all three branches. That broke Phase 2 and
+  Phase 15's own deliberately-blind baseline (`reservations_enabled=False`,
+  no other coordination on) — the "before Phase 5" picture those tests
+  exist to produce honestly, robots driving straight through each other on
+  purpose, with the crash count as the whole point. The new layer was
+  quietly preventing exactly the crashes those tests are built to assert.
+  Fixed by moving the call INSIDE each of the three real branches instead
+  of after all of them: this backstop is part of the SAME safety machinery
+  as booking and the local reflex, so switching all of it off for that one
+  deliberate baseline has to mean this too, not just the rest.
+
+  **`shared/fleetx_core/robot.py`** — new public `geometry_brake()` method:
+  a flat, unnegotiated hard stop, the same shape as the existing
+  `_human_too_close()` hard stop (no priority, no reasoning about who goes
+  first, just "too close — stop"). It does not invent its own recovery —
+  whichever robot in a caught pair is mid-square (at least one always is;
+  see below) is exactly the case `back_out_if_wedged()` already knows how
+  to reverse out of, the same machinery every other emergency hold already
+  relies on.
+
+  **`0.9` is not an arbitrary number.** On this grid, robots move only
+  axis-aligned, never diagonally. Two robots resting exactly on grid points
+  are therefore always either on the same square (an actual crash) or at
+  least 1.0 squares apart — there is no grid-point spacing strictly between
+  `COLLISION_DISTANCE` (0.7, touching) and 1.0. Anything in that band can
+  only happen mid-transit, and 0.9 sits inside it: comfortably below the
+  normal 1.0 operating floor (so it is invisible unless something has
+  already let two robots get closer than usual) and comfortably above 0.7
+  (so it acts as an early brake, not a bystander to the crash itself).
+
+  **`tests/test_phase19.py` (new)** — 9 tests: the backstop engages below
+  the gap and stays off exactly at and above the normal 1.0 floor (including
+  a diagonal-neighbour case), one sustained encroachment counts as ONE
+  intervention (not once per tick, the same dedup `_detect_collisions`
+  already uses), it never overwrites a hold already set for an unrelated
+  reason, a wedged robot it catches recovers on its own via the existing
+  back-out machinery rather than freezing forever, it fires identically in
+  FLEET-X, stop-and-wait, and central mode, and — the actual claim — a real
+  120-second run at 3, 5, and 10 robots never needs it at all. All 9 pass.
+
+- **Why:** booking a square is not the same claim as "nothing else is
+  physically nearby." A robot's real body moves continuously between the
+  grid points booking reasons about, and the two can disagree right at a
+  shared corner without either side's reservation ever noticing. This adds
+  the finer, ground-truth layer that would catch that — and, just as
+  importantly, anything else that might someday let two robots' actual
+  positions get closer than intended, from a future bug rather than this
+  specific corner case — without touching how booking, negotiation, or the
+  central boss make their own decisions.
+
+- **Milestone:** Phase 19.
+
+- **How to see it:**
+  ```
+  python3 -m unittest tests.test_phase19 -v
+  python3 tools/check_purity.py
+  ```
+
+- **Results measured (real numbers, nothing massaged):**
+  - New test suite: 9 of 9 pass.
+  - Full suite (`python3 -m unittest discover -s tests`): 408 of 408 pass
+    (399 before this phase, plus the 9 new ones) — including, after the
+    gating fix above, the Phase 2/3/4 tests that specifically require the
+    deliberately-blind baseline to still crash.
+  - `tools/final_table.py` re-run (smoke scope, CSV written to a scratch
+    path so the tracked one was never touched): **closest two robots ever
+    came: 1.000 squares** — the exact same figure as before this phase,
+    confirming the new layer changes nothing about how close robots
+    normally get.
+  - Collisions: **0** in every test, before and after.
+  - `geometry_interventions` (the new counter, one per distinct
+    encroachment episode): **0** across every existing scenario in the test
+    suite and every benchmark run — exactly what "a backstop, not a change
+    to existing behaviour" should look like. It only ever fires in the
+    tests built specifically to construct the hazard by hand.
+
+- **Decisions worth remembering:**
+  - No hysteresis, no closing-velocity check, no separate release logic was
+    needed. A flat "too close right now — stop" check, re-evaluated fresh
+    every tick exactly like `_human_too_close()`, releases itself the
+    moment the primary coordination layer's own hold decision (computed
+    fresh every tick, before this layer can see it) is no longer being
+    overridden — the same handoff any other emergency stop already gets.
+    Adding hysteresis was considered and dropped: it would have required
+    inventing a release condition that two mutually-frozen robots could
+    never satisfy on their own, when the existing wedge-recovery machinery
+    already solves exactly that.
+  - Deliberately did not touch `_local_safety_says_stop()` (the existing
+    message/contact-based reflex) or the reservation table at all. This is
+    a genuinely independent, additive layer — ground truth in, a hold flag
+    out, nothing upstream needs to know it exists.
+
+---
+
+### 2026-09-11 (even later) — Phase 18: the central planner rival
+
+- **What:** a real third fleet option, `coordination="CENTRAL"` — one boss
+  computer plans every robot's route, instead of robots negotiating
+  peer-to-peer. `26_IMPROVEMENTS_AND_UPGRADES.md` item #1 calls this "the one
+  experiment that directly answers 'why not centralized?' with data instead
+  of an argument," and this is that experiment, built to be a real rival, not
+  a strawman it was built to beat.
+
+  **`shared/fleetx_core/central.py` (new)** — `CentralPlanner`. It sees the
+  whole warehouse and plans conflict-aware routes using the SAME `find_path` +
+  `avoidance_cost` + `ReservationTable` FLEET-X's own robots use to book a
+  square, and assigns work with the SAME `Robot.cost_of()` auction math —
+  just computed by one entity with perfect information instead of negotiated
+  between many robots working from partial, sometimes-stale pictures. The one
+  thing it does not have, because this is what "central" means, is any local
+  intelligence on the robot end: a centrally-controlled robot never plans,
+  reroutes, bids, or self-manages its battery. It follows the last path it
+  was told, keeping only the same local safety reflex (`stop_and_wait_check`,
+  reused verbatim) every robot has regardless of architecture. Everything
+  else — the route, what happens next — arrives as a `CentralCommand`
+  message over the SAME simulated radio (`InMemoryBus`) as everything else in
+  this project, subject to the SAME packet loss and the SAME "cut the
+  network" switch already built in Phase 14. The boss even learns a task was
+  picked up or delivered by being TOLD (the existing `TaskClaim` messages
+  robots already publish), never by peeking at a robot's private state — lose
+  that message and the boss genuinely does not know the delivery leg is due.
+
+  **`shared/fleetx_core/robot.py`** — added `centrally_controlled`, and
+  `_ingest_central_command()` to turn an incoming `CentralCommand` into a
+  local `Task`/path, with a dedup guard so a resent command (the boss cannot
+  tell "never arrived" from "just slow", so it repeats itself) never yanks a
+  robot back to the start of its own route. `decide()` and `work_on_tasks()`
+  both gained an early-return branch for centrally-controlled robots: they
+  still move, arrive, and run the shared safety reflex, but never self-plan.
+
+  **`shared/fleetx_core/world.py`** — `coordination="CENTRAL"` builds a
+  `CentralPlanner`, ticks it once per world tick, and gates every place a
+  robot could otherwise get a goal the boss doesn't know about (battery
+  self-management, station-vacating, demand-prediction pre-positioning) so a
+  centrally-controlled robot truly only ever does what it was told.
+
+  **`shared/fleetx_core/messages.py`** — new `CentralCommand` message type.
+
+  **`shared/fleetx_core/bus.py`** — a real bug fix, not central-only: message
+  routing used to assume `robot_id` always means "who sent this." A
+  `CentralCommand`'s `robot_id` means "who this is FOR," so the bus was
+  excluding the intended recipient from delivery and routing it only to the
+  boss's own inbox. Fixed by routing on an explicit `sender` field when
+  present, falling back to `robot_id` otherwise — this also correctly
+  respects `TaskClaim`'s own `sender` field (added in Phase 23) at the
+  delivery level for the first time, not just in the security layer.
+
+  **`tools/central_table.py` (new)** — a SEPARATE benchmark tool from
+  `tools/final_table.py` on purpose, so the official FLEET-X-vs-stop-and-wait
+  numbers never depend on this file. Two tables: network up the whole time,
+  and network cut halfway through, both counting orders delivered over the
+  same fixed window `final_table.py` uses, for the same reason (a jammed
+  fleet's own "seconds per order" only covers what it survived).
+
+  **`tests/test_phase18.py` (new)** — 7 tests: a task actually gets
+  delivered end-to-end, robots never self-route under central control, no
+  collisions under normal load, a resent command doesn't teleport a robot,
+  and the headline claim itself — cut the network and central mode stalls
+  cleanly with zero collisions while FLEET-X keeps delivering through the
+  same blackout. All 7 pass.
+
+- **Bugs found and fixed while building this** (each found by writing a small
+  reproduction, tracing state directly, and confirming the fix before moving
+  on — not by reasoning alone):
+  1. `World._sync_board()` overwrites a robot's own board entry over the
+     boss's — built for "robots negotiate, world just observes," it stomped
+     the boss's own correct assignment every tick with a centrally-controlled
+     robot's own passive (and permanently stale) copy. Fixed by skipping it
+     entirely when `world.central` exists — the boss IS the board's owner in
+     that mode.
+  2. The bus sender-routing bug above (`bus.py`) — without it, no
+     `CentralCommand` ever reached the robot it was addressed to.
+  3. `vacate_station()` calls `robot.set_goal()` directly, the same
+     "gives a robot a goal the boss doesn't know about" bug pattern already
+     avoided for battery management and prepositioning, but not yet gated
+     for this one. A robot that had just delivered got stranded, WAITING
+     forever on a goal nobody ever told the boss about. Fixed by gating it
+     the same way.
+  4. `_book()` stamped every square in a whole route with the SAME start
+     time (`now`), not one advancing per square — a robot's entire path
+     looked "occupied right now" to everyone else's planning, not just the
+     square it currently occupied, and throughput collapsed to a fraction of
+     what it should have been. Fixed with proper sequential per-square
+     windows based on the robot's real speed.
+
+- **Tried and reverted, reported honestly:** gave the boss a way to notice a
+  robot that had not moved in 8+ seconds (well past the local safety reflex's
+  own recovery window) and replan it from where it actually was — a real
+  capability a control room would have. Measured, not assumed: at 5 robots
+  it made things WORSE, not better (39 → 26 orders over the same 400s),
+  because a "fresh" route was planned against a table that was itself
+  changing shape as neighbours did the same thing, turning one robot's
+  localized stall into fleet-wide cascading gridlock. Reverted back to "plan
+  once, only reconsider on a fact the robot itself reports" (PICKED/DONE).
+  Slower to escape any single stall, but it does not manufacture new ones.
+
+- **Why:** proving decentralisation was the RIGHT call needs a real rival
+  measured honestly, not an assumption. FLEET-X beating stop-and-wait proves
+  the coordination ALGORITHM works. It does not prove the ARCHITECTURE was
+  necessary — a central planner running similar logic could plausibly do
+  fine, as long as its link to the robots stays up. That "as long as" is the
+  whole case for decentralisation, and it needed a number, not an argument.
+
+- **Milestone:** Phase 18 (26_IMPROVEMENTS_AND_UPGRADES item #1).
+
+- **How to see it:**
+  ```
+  python3 -m unittest tests.test_phase18 -v
+  python3 tools/check_purity.py
+  python3 -u tools/central_table.py
+  ```
+
+- **Results measured (400s of orders, one every 4s, 3 seeds per fleet size,
+  identical work for both fleets, real numbers, nothing massaged):**
+
+  | fleet size | network UP: FLEET-X | network UP: central | network CUT at 50%: FLEET-X | network CUT at 50%: central |
+  |---|---|---|---|---|
+  | 3  | 86.0 orders | 27.0 orders | 46.7 orders | 24.3 orders |
+  | 5  | 97.7 orders | 17.3 orders | 50.0 orders | 14.7 orders |
+  | 10 | 98.0 orders | 10.3 orders | 50.0 orders | 10.3 orders |
+
+  Collisions across every single run, network up or cut: **0**.
+
+  Two honest findings, not one: (1) even with a perfect network, this central
+  planner trails FLEET-X substantially, and the gap widens with fleet size —
+  a single planner sending coarse, periodic commands reacts to real-time
+  congestion far worse than FLEET-X's continuous peer-to-peer negotiation
+  (bidding, priority reversal, jam-watching), so centralising the DECISION
+  costs throughput even before anything fails. (2) cutting the network makes
+  it worse still, though at higher fleet density the effect is partly masked
+  by congestion that was already capping it before the cut (clearest at 10
+  robots, where the network-up and network-cut numbers are nearly identical —
+  it had already stalled on its own). `tests/test_phase18.py`'s
+  lower-congestion scenarios isolate the network-specific effect cleanly:
+  cut the radio and central mode's throughput increase flatlines while
+  FLEET-X's keeps climbing through the same blackout, both with zero
+  collisions.
+
+- **Decisions worth remembering:**
+  - `robot_id` means "who sent this" almost everywhere, but for
+    `CentralCommand` it means "who this is FOR," and for `TaskClaim`'s
+    peer-releases-a-quiet-robot's-job case (Phase 23) it means "whose task
+    this is." Both need the explicit `sender` field respected — now at the
+    bus's actual delivery logic, not only in the security/replay layer.
+  - The central planner deliberately does NOT replan a robot mid-flight just
+    because it has stalled — see "Tried and reverted" above. A boss that
+    only reconsiders on a fact the robot reports (not on a guess about why it
+    stopped) does not risk making congestion worse trying to fix it.
+  - Dashboard UI (a selectable "Central" option in `grid_sim/web/index.html`)
+    was NOT built — the ask was proof by measurement, and `comparison.py`'s
+    two-panel model would need real redesign to show three, which felt like
+    unnecessary risk to the working dashboard for a benchmark this session
+    already answered with `tools/central_table.py` and passing tests.
+
+- **Not built yet:** central mode has no dashboard presence. If a live,
+  visual "watch the boss lose control" demo is wanted later, `comparison.py`
+  and `web/index.html` are the two files that would need it.
+
+---
+
+### 2026-09-11 (later still) — Phase 22: people on the warehouse floor
+
+- **What:** a few people now walk the same floor as the robots. Robots keep a
+  hard bubble around each one, slow down before they reach it, and reroute
+  around anyone standing in their way — using the SAME mechanisms already
+  built for everything else, fed a new kind of thing to avoid.
+
+  **`shared/fleetx_core/humans.py`** — a `Human` is deliberately much simpler
+  than a `Robot`: no radio, no job, no priority, no reservation table. It just
+  walks, with the same teleport invariant a robot is held to (never further
+  than speed * dt in one tick). Wandering (picking a new random destination
+  once arrived) lives in `World.tick()`, the same way the old robot free-roam
+  patrol did.
+
+  **How a robot finds out where a person is:** exactly how it finds out about
+  a dropped box — by SENSING them locally (`Robot.sense_humans()`, fed by
+  `World._run_sensors()`), never by a message, because a safety system built
+  around people cannot depend on a network staying up. Wider range than
+  ordinary obstacle sensing (`PERSON_SENSE_RANGE`), because a person deserves
+  earlier warning than a box does.
+
+  **Three things happen once a person is sensed, all reusing existing
+  machinery:**
+  1. **Never enter their space.** `PERSON_STOP_RADIUS` (1.3 squares) is
+     checked in `_local_safety_says_stop()` — the exact reflex that already
+     stops one robot driving into another, extended with a check that comes
+     FIRST and has no negotiation: no priority, no "they are parked so I can
+     go". Too close to a person always means stop. This lives in the SHARED
+     reflex both fleets call, so stop-and-wait is protected exactly as well
+     as FLEET-X — the same reasoning that already applies to robot-robot
+     safety.
+  2. **Slow down before that.** `travel_speed()` ramps a robot's speed down
+     from full at `PERSON_SLOW_RADIUS` (3.0 squares) to a crawl at the stop
+     line, multiplied together with the existing network-loss slowdown, so a
+     robot already cautious about the network is MORE cautious near a
+     person, never less.
+  3. **Reroute around them.** Sensing a person marks their square, and the
+     four next to it, as "blocked" in the robot's own `blocked_map` — the
+     identical mechanism a dropped pallet already uses to trigger a replan.
+     "Reroute around a person" is not new logic; it is that old logic fed a
+     new kind of thing to avoid. Marked with a short TTL (1.2s), refreshed
+     every tick they stay in range, so it fades within about a second of
+     them moving on — and never broadcast over the radio, or the whole fleet
+     would start avoiding a square someone merely walked past once.
+
+  **On the dashboard:** a **People** panel and a **+ Add person / − Remove
+  person** pair of buttons. People are drawn as a head-and-shoulders glyph in
+  warm amber — a shape and colour no robot ever uses — with a faint dashed
+  ring at true PERSON_STOP_RADIUS scale, so the safety bubble is visible, not
+  just asserted. The People panel says in words which robots are currently
+  easing off for which person.
+
+- **Two real bugs, both found by testing the exact case that matters, not
+  the easy case.**
+
+  1. **A parked robot never checked anything.** `check_clearance()` and
+     `stop_and_wait_check()` both start with "if there is no path, do
+     nothing and return" — reasonable for two robots, since whichever one is
+     MOVING is always the one whose own check catches the danger. It is not
+     reasonable for a person, who has no comparable check of their own by
+     design. An idle robot with nowhere to go simply never looked, and a
+     person's wander path walked straight up to one, undetected, in the very
+     first test that tried it. Fixed: both functions now check for a nearby
+     person even with no path, using the robot's own current square as what
+     needs protecting.
+
+  2. **That fix alone was not enough**, and the reason is worth stating
+     plainly: setting a STATIONARY robot's hold flag changes nothing about
+     its physics, because it was never going to move regardless. The actual
+     gap was that nothing on the PERSON's side ever noticed the robot at
+     all — their wander path was planned with no idea a robot existed there.
+     Fixed with a second, independent check: `Human.advance()` now refuses
+     to walk any closer to a robot's current position than the SAME stop
+     radius the robot itself respects. Neither side has to trust the other's
+     good behaviour — both independently refuse to close the final gap,
+     which is what actually closed it in testing: 20 robots and 8 people,
+     300 seconds, closest approach 1.28 squares, 0 collisions; repeated at
+     10 and 3 robots; repeated again under a full network blackout; repeated
+     again on the stop-and-wait baseline.
+
+- **Why:** "robots must never enter a person's space" is not a metric to
+  optimise, it is the one thing this feature is not allowed to get wrong even
+  once. Both bugs were found by testing that exact sentence directly, not by
+  running the demo and hoping.
+
+- **Milestone:** Phase 22 — Human-robot collaboration (doc 19).
+
+- **How to see it:** `python3 grid_sim/run.py 8000`, press **+ Add person**
+  a few times, then Start orders. Watch the People panel name which robot is
+  easing off for whom, and watch a robot visibly detour around someone
+  standing in an aisle rather than stopping and waiting for them to leave.
+
+- **Gate:** 392 tests pass (22 new). Purity guard clean (19 files). All 31
+  dashboard buttons respond at 20 robots under load, 0 failures. Stress:
+  0 collisions across 20+8, 10+8 and 3+8 robots+people at 150-300s each,
+  a full network blackout with people on the floor, repeated add/remove of
+  both robots and people together, and the stop-and-wait baseline under the
+  same load — closest approach never below 1.19 squares against a 0.7
+  threshold. Humans are opt-in and start at zero, so the untouched
+  3/5/10/15/20 benchmark table is unaffected — see below.
+
+
+### 2026-09-11 (later) — Phase 23: message authentication and robot health
+
+- **What:** two things, both from doc 20 and doc 23.
+
+  **1. Messages are signed. A fake one gets thrown away before the brain ever
+  reads it.** `shared/fleetx_core/security.py` is deliberately small enough to
+  read in one sitting:
+    - every real fleet member is issued the same key when it joins
+      (`FLEET_KEY`) -- a real deployment would give each robot its OWN
+      certificate instead, and it slots in without changing anything else,
+      because the file only ever asks "does this tag prove the sender holds a
+      fleet key?";
+    - every message going out is signed with an HMAC-SHA256 tag over its
+      **entire content** -- not just who sent it and when, but every field,
+      so tampering with a battery reading or a status after the fact breaks
+      the tag exactly the same as forging the sender does;
+    - every message coming in is checked BEFORE `communicate()` hands it to
+      the rest of the brain. No tag, wrong tag, or a sequence number already
+      seen (or older than one already accepted from that sender): dropped,
+      and logged in plain English -- *"R4 rejected a TASK_CLAIM claiming to be
+      from GHOST-1 - no signature"*.
+    - **"Inject a fake message"** button does doc 20's own demo: forges a
+      TaskClaim stealing an open job (or a Heartbeat claiming a real robot has
+      failed), publishes it unsigned, and the event feed shows every robot
+      rejecting it while the real fleet carries on.
+
+  **2. Every robot scores its own health, from things it genuinely measures.**
+  `shared/fleetx_core/health.py` combines four real signals -- battery, how
+  long it has gone without making progress, how long since its radio last
+  heard anything, and how often it has had to reroute or get wedged and back
+  out -- into a score and a band (HEALTHY / WARNING / SERVICE_SOON /
+  CRITICAL), with the reasons printed in words, not just a number. Nothing is
+  invented telemetry; every input already exists elsewhere in the brain for
+  its own reason. A CRITICAL robot stops bidding for new work (doc 23's own
+  policy: "reduce new task assignments") but keeps finishing whatever it is
+  already carrying -- the same shape as the battery gate that already passed
+  the gate before. The dashboard's Heartbeat message had a `health` field
+  since early on, defaulted to the placeholder "OK"; it now carries the real
+  band.
+
+- **Five real bugs found building this, three of them pre-existing and only
+  made visible by turning authentication ON.** Worth reading in full, because
+  each is a lesson about a different part of the fleet, not just about
+  security:
+
+  1. **The signature only covered identity, not content**, at first --
+     who/when/seq/type, not the payload. A battery reading changed AFTER
+     signing still verified fine. Caught by my own test before it ever reached
+     the gate. Fixed by signing the message's own `to_dict()` in full.
+
+  2. **`reset_counters()` rewinds `sim_time` to zero but never touched the
+     bus's OWN internal clock.** A message published in the scenario code
+     right after a reset -- which runs BEFORE `world.tick()` resyncs the bus
+     -- got stamped for delivery using the bus's stale, higher time from
+     before the reset, sat queued, and arrived late: after later, normally
+     -timed messages had already been accepted, reading as a replay. This is
+     a genuine clock desync that predates Phase 23 entirely; it simply had no
+     visible symptom until something started checking message order. Fixed
+     with `InMemoryBus.reset_clock()`, called from `reset_counters()`.
+
+  3. **`remove_robot()` never told the bus the departing robot was gone.**
+     Its inbox entry stayed in `bus._inboxes` forever, silently collecting
+     every message the rest of the fleet sent to a name nobody was polling.
+     When a new robot later joined under that SAME reused name, it was handed
+     the entire backlog in one go -- some of it many seconds old, which the
+     security layer correctly refused as stale. Also pre-existing (the
+     backlog itself, and the memory leak), also invisible until now. Fixed
+     with `InMemoryBus.unregister()`.
+
+  4. **A rejoining robot's OWN first messages used to be rejected too** --
+     `add_robot_live()` reissues a freed name, but every OTHER robot still
+     remembered the departed robot's much higher last sequence number, so the
+     newcomer's first message (seq 1) read as an ancient replay, forever.
+     Fixed by having every robot forget that name at the moment it is
+     reissued -- not at removal, because the departing robot can still have
+     one legitimate message in flight at that exact instant.
+
+  5. **The deepest one: a robot legitimately speaking ABOUT another robot used
+     that OTHER robot's name as the sender.** When robot X notices peer Y has
+     gone quiet, X releases Y's held task on Y's behalf -- an existing,
+     correct Phase 9 behaviour. But the message it sent said `robot_id=Y`
+     while carrying X's OWN sequence number, because a sequence number only
+     means anything within the counter that produced it. Every receiver's
+     replay guard, keyed on `robot_id`, saw "Y's" sequence jump around
+     unpredictably and rejected genuine fleet traffic. `TaskClaim` now carries
+     a separate `sender` field -- empty for the 99% of ordinary traffic where
+     robot_id already IS the sender, set explicitly for this one case -- so
+     `robot_id` keeps meaning "whose claim this is" everywhere it always has,
+     and replay protection keys on whoever the sequence number actually
+     belongs to.
+
+  Bugs 2-5 were chased down entirely through disciplined reproduction: a
+  fresh boot alone showed nothing; the fault only appeared with real
+  wall-clock timing through the actual background thread, which is exactly
+  how the dashboard runs. Reproducing it that way, not just in a synchronous
+  test loop, is what found it.
+
+- **A stated limitation, not hidden.** All robots share one key, so the
+  signature proves "someone who holds the fleet key sent this," not
+  specifically "the robot named in `robot_id` sent this" -- an attacker
+  without the key is stopped cold, but one robot cannot be cryptographically
+  told apart from another under this scheme. Real per-robot certificates would
+  close that; a shared secret is what an MVP needs to demonstrate the actual
+  property being asked for, honestly labelled as a simplification.
+
+- **Why:** a forged message that steals a job, or a robot that fails without
+  warning, are both things a real deployment cannot shrug off. Both are also
+  things a judge can be shown happening and then not happening.
+
+- **Milestone:** Phase 20 (security) and Phase 23 (predictive maintenance,
+  the health half).
+
+- **How to see it:** `python3 grid_sim/run.py 8000`. The new **Security**
+  panel shows how many messages have been rejected and why; press **Inject a
+  fake message** and watch the event feed. The new **Robot health** panel
+  lists every robot's score, band and reasons, sorted worst first; wall a
+  robot in or cut the network to watch a band change live.
+
+- **Gate:** 349 tests pass (38 new, across `test_phase20.py` and
+  `test_phase23.py`). Purity guard clean (18 files; `hashlib`/`hmac` added to
+  the allow-list -- both pure standard library, run identically on both
+  parts). All 29 dashboard buttons respond at 20 robots under load, 0
+  failures. Zero false rejections across a 200s ordinary run, four
+  repeated add/remove cycles, a reset fired mid-flight, a full network
+  blackout and recovery, and the exact chaotic real-time button-mashing the
+  dashboard actually produces. Collisions 0 throughout. Full 3/5/10/15/20
+  table below.
+
+
 ### 2026-09-11 (later still) — Phase 12: guessing where the work will be
 
 - **What:** robots learn which aisles get busy and, when they have nothing to

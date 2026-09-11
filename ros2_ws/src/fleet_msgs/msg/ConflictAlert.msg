@@ -6,6 +6,7 @@
 string robot_id             # who raised it
 builtin_interfaces/Time stamp
 uint32 seq
+string tag                  # Phase 23: HMAC signature -- see security.py
 
 string robot_a
 string robot_b

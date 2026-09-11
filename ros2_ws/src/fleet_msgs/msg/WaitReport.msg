@@ -8,6 +8,7 @@
 string robot_id
 builtin_interfaces/Time stamp
 uint32 seq
+string tag                  # Phase 23: HMAC signature -- see security.py
 
 bool is_blocked             # false = not stuck at all
 string blocked_by

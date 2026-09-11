@@ -350,6 +350,16 @@ class OrderGenerator:
         # there to learn. It is seeded like everything else, so both sides of
         # the benchmark still get the identical stream of orders.
         shelf = self._pick_shelf_with_a_pattern(now)
+        # Phase 21. Off by default. On: a picker does not walk to the shelf
+        # they thought of first if a closer bin has the same product --
+        # they go collect the PRODUCT, from wherever the best current stock
+        # of it actually is. Without this redirect, re-slotting could swap
+        # shelves all day and no order would ever notice; this is the other
+        # half that makes a shorter shelf into a shorter TRIP.
+        if self.world.reslotting_enabled:
+            shelf = (self.world.reslotter.best_shelf_for(
+                        shelf.product, self.world.inventory, self.world.grid)
+                    or shelf)
         pickup = shelf.face
         dropoff = self._rng.choice(self.dropoffs)
         quantity = self._rng.choice([1, 1, 1, 2, 2, 3])

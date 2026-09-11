@@ -89,6 +89,7 @@ def pose_to_ros(m: PoseUpdate) -> RobotState:
     out.robot_id = m.robot_id
     out.stamp = to_ros_time(m.timestamp)
     out.seq = m.seq
+    out.tag = getattr(m, "tag", "")
     out.x, out.y = float(m.x), float(m.y)
     out.cell = [int(m.cell[0]), int(m.cell[1])]
     out.velocity = float(m.velocity)
@@ -101,6 +102,7 @@ def intent_to_ros(m: IntentUpdate) -> RobotIntent:
     out.robot_id = m.robot_id
     out.stamp = to_ros_time(m.timestamp)
     out.seq = m.seq
+    out.tag = getattr(m, "tag", "")
     out.x, out.y = float(m.x), float(m.y)
     out.velocity = float(m.velocity)
     out.has_destination = m.destination is not None
@@ -119,6 +121,7 @@ def heartbeat_to_ros(m: Heartbeat) -> BatteryStatus:
     out.robot_id = m.robot_id
     out.stamp = to_ros_time(m.timestamp)
     out.seq = m.seq
+    out.tag = getattr(m, "tag", "")
     out.battery = float(m.battery)
     out.status = m.status
     out.health = m.health
@@ -130,6 +133,7 @@ def conflict_to_ros(m: ConflictAlert) -> ConflictAlertMsg:
     out.robot_id = m.robot_id
     out.stamp = to_ros_time(m.timestamp)
     out.seq = m.seq
+    out.tag = getattr(m, "tag", "")
     out.robot_a, out.robot_b = m.robot_a, m.robot_b
     out.resource = [int(m.resource[0]), int(m.resource[1])]
     out.kind = m.kind
@@ -142,6 +146,7 @@ def reservation_to_ros(m: PathReservation) -> PathReservationMsg:
     out.robot_id = m.robot_id
     out.stamp = to_ros_time(m.timestamp)
     out.seq = m.seq
+    out.tag = getattr(m, "tag", "")
     out.action, out.kind = m.action, m.kind
     out.cells = flatten(m.cells)
     out.start, out.end = float(m.start), float(m.end)
@@ -154,6 +159,7 @@ def blocked_to_ros(m: BlockedAisle) -> BlockedAisleMsg:
     out.robot_id = m.robot_id
     out.stamp = to_ros_time(m.timestamp)
     out.seq = m.seq
+    out.tag = getattr(m, "tag", "")
     out.cell = [int(m.cell[0]), int(m.cell[1])]
     out.confidence = float(m.confidence)
     out.ttl = float(m.ttl)
@@ -166,6 +172,7 @@ def task_to_ros(m: TaskAnnounce) -> TaskMsg:
     out.robot_id = m.robot_id
     out.stamp = to_ros_time(m.timestamp)
     out.seq = m.seq
+    out.tag = getattr(m, "tag", "")
     out.task_id = m.task_id
     out.pickup = [int(m.pickup[0]), int(m.pickup[1])]
     out.dropoff = [int(m.dropoff[0]), int(m.dropoff[1])]
@@ -182,6 +189,7 @@ def bid_to_ros(m: TaskBid) -> TaskBidMsg:
     out.robot_id = m.robot_id
     out.stamp = to_ros_time(m.timestamp)
     out.seq = m.seq
+    out.tag = getattr(m, "tag", "")
     out.task_id = m.task_id
     out.cost = float(m.cost)
     return out
@@ -192,8 +200,10 @@ def claim_to_ros(m: TaskClaim) -> TaskClaimMsg:
     out.robot_id = m.robot_id
     out.stamp = to_ros_time(m.timestamp)
     out.seq = m.seq
+    out.tag = getattr(m, "tag", "")
     out.task_id = m.task_id
     out.action = m.action
+    out.sender = getattr(m, "sender", "")
     out.cost = float(m.cost)
     return out
 
@@ -203,6 +213,7 @@ def wait_to_ros(m: WaitReport) -> WaitReportMsg:
     out.robot_id = m.robot_id
     out.stamp = to_ros_time(m.timestamp)
     out.seq = m.seq
+    out.tag = getattr(m, "tag", "")
     out.is_blocked = m.blocked_by is not None
     out.blocked_by = m.blocked_by or ""
     out.waiting = float(m.waiting)
@@ -216,6 +227,7 @@ def yield_to_ros(m: YieldRequest) -> YieldRequestMsg:
     out.robot_id = m.robot_id
     out.stamp = to_ros_time(m.timestamp)
     out.seq = m.seq
+    out.tag = getattr(m, "tag", "")
     out.target = m.target
     out.resource = [int(m.resource[0]), int(m.resource[1])]
     out.reason = m.reason
@@ -225,14 +237,16 @@ def yield_to_ros(m: YieldRequest) -> YieldRequestMsg:
 # ------------------------------------------------------- ROS 2 -> brain
 
 def ros_to_pose(m: RobotState) -> PoseUpdate:
-    return PoseUpdate(
+    out = PoseUpdate(
         robot_id=m.robot_id, timestamp=from_ros_time(m.stamp), seq=m.seq,
         x=m.x, y=m.y, cell=(int(m.cell[0]), int(m.cell[1])),
         velocity=m.velocity, heading=m.heading)
+    out.tag = m.tag
+    return out
 
 
 def ros_to_intent(m: RobotIntent) -> IntentUpdate:
-    return IntentUpdate(
+    out = IntentUpdate(
         robot_id=m.robot_id, timestamp=from_ros_time(m.stamp), seq=m.seq,
         x=m.x, y=m.y, velocity=m.velocity,
         destination=(int(m.destination[0]), int(m.destination[1]))
@@ -241,65 +255,86 @@ def ros_to_intent(m: RobotIntent) -> IntentUpdate:
         node_etas=list(m.node_etas),
         eta_destination=m.eta_destination if m.has_eta_destination else None,
         priority=m.priority, status=m.status)
+    out.tag = m.tag
+    return out
 
 
 def ros_to_heartbeat(m: BatteryStatus) -> Heartbeat:
-    return Heartbeat(
+    out = Heartbeat(
         robot_id=m.robot_id, timestamp=from_ros_time(m.stamp), seq=m.seq,
         battery=m.battery, status=m.status, health=m.health)
+    out.tag = m.tag
+    return out
 
 
 def ros_to_conflict(m: ConflictAlertMsg) -> ConflictAlert:
-    return ConflictAlert(
+    out = ConflictAlert(
         robot_id=m.robot_id, timestamp=from_ros_time(m.stamp), seq=m.seq,
         robot_a=m.robot_a, robot_b=m.robot_b,
         resource=(int(m.resource[0]), int(m.resource[1])),
         kind=m.kind, estimated_time=m.estimated_time)
+    out.tag = m.tag
+    return out
 
 
 def ros_to_reservation(m: PathReservationMsg) -> PathReservation:
-    return PathReservation(
+    out = PathReservation(
         robot_id=m.robot_id, timestamp=from_ros_time(m.stamp), seq=m.seq,
         action=m.action, kind=m.kind, cells=unflatten(list(m.cells)),
         start=m.start, end=m.end, priority=m.priority)
+    out.tag = m.tag
+    return out
 
 
 def ros_to_blocked(m: BlockedAisleMsg) -> BlockedAisle:
-    return BlockedAisle(
+    out = BlockedAisle(
         robot_id=m.robot_id, timestamp=from_ros_time(m.stamp), seq=m.seq,
         cell=(int(m.cell[0]), int(m.cell[1])), confidence=m.confidence,
         ttl=m.ttl, cleared=m.cleared)
+    out.tag = m.tag
+    return out
 
 
 def ros_to_task(m: TaskMsg) -> TaskAnnounce:
-    return TaskAnnounce(
+    out = TaskAnnounce(
         robot_id=m.robot_id, timestamp=from_ros_time(m.stamp), seq=m.seq,
         task_id=m.task_id,
         pickup=(int(m.pickup[0]), int(m.pickup[1])),
         dropoff=(int(m.dropoff[0]), int(m.dropoff[1])),
         product=m.product, shelf=m.shelf, quantity=int(m.quantity),
         priority=m.priority, flexible=m.flexible)
+    out.tag = m.tag
+    return out
 
 
 def ros_to_bid(m: TaskBidMsg) -> TaskBid:
-    return TaskBid(robot_id=m.robot_id, timestamp=from_ros_time(m.stamp),
-                   seq=m.seq, task_id=m.task_id, cost=m.cost)
+    out = TaskBid(robot_id=m.robot_id, timestamp=from_ros_time(m.stamp),
+                  seq=m.seq, task_id=m.task_id, cost=m.cost)
+    out.tag = m.tag
+    return out
 
 
 def ros_to_claim(m: TaskClaimMsg) -> TaskClaim:
-    return TaskClaim(robot_id=m.robot_id, timestamp=from_ros_time(m.stamp),
-                     seq=m.seq, task_id=m.task_id, action=m.action, cost=m.cost)
+    out = TaskClaim(robot_id=m.robot_id, timestamp=from_ros_time(m.stamp),
+                    seq=m.seq, task_id=m.task_id, action=m.action,
+                    sender=m.sender, cost=m.cost)
+    out.tag = m.tag
+    return out
 
 
 def ros_to_wait(m: WaitReportMsg) -> WaitReport:
-    return WaitReport(
+    out = WaitReport(
         robot_id=m.robot_id, timestamp=from_ros_time(m.stamp), seq=m.seq,
         blocked_by=m.blocked_by if m.is_blocked else None,
         waiting=m.waiting, priority=m.priority, is_moving=m.is_moving)
+    out.tag = m.tag
+    return out
 
 
 def ros_to_yield(m: YieldRequestMsg) -> YieldRequest:
-    return YieldRequest(
+    out = YieldRequest(
         robot_id=m.robot_id, timestamp=from_ros_time(m.stamp), seq=m.seq,
         target=m.target, resource=(int(m.resource[0]), int(m.resource[1])),
         reason=m.reason)
+    out.tag = m.tag
+    return out

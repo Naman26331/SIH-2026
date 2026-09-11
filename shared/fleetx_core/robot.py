@@ -17,6 +17,7 @@ differs between simulation and a real robot.
 """
 
 import random
+from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, Iterable, List, Optional
@@ -26,11 +27,16 @@ from .conflicts import (DEFAULT_CLEARANCE, DEFAULT_HORIZON, Conflict, Plan,
                         build_plan, find_conflicts)
 from .deadlock import STUCK_SECONDS, WaitForGraph, Waiting, choose_victim
 from .demand import DemandModel
+from .health import CRITICAL as HEALTH_CRITICAL
+from .health import BANDS, HEALTHY, INCIDENT_WINDOW
+from .health import HealthReport, compute as compute_health
+from .humans import Human
+from . import security
 from .fleet_view import FleetView
 from .grid import Cell, CellKind, Grid
-from .messages import (BlockedAisle, ConflictAlert, Heartbeat, IntentUpdate,
-                       PathReservation, PoseUpdate, TaskAnnounce, TaskBid,
-                       TaskClaim, WaitReport, YieldRequest)
+from .messages import (BlockedAisle, CentralCommand, ConflictAlert, Heartbeat,
+                       IntentUpdate, PathReservation, PoseUpdate, TaskAnnounce,
+                       TaskBid, TaskClaim, WaitReport, YieldRequest)
 from .obstacles import DEFAULT_TTL, BlockedMap
 from .tasks import (BID_WINDOW, CLAIM_TIMEOUT, Task, TaskBoard, TaskStatus,
                     auction_winner, bid_cost, bid_rank)
@@ -97,6 +103,8 @@ class Robot:
     seq: int = 0                          # message counter, lets others spot losses
     messages_sent: int = 0
     messages_heard: int = 0
+    messages_rejected: int = 0       # forged, replayed or stale -- Phase 23
+    _replay_guard: "security.ReplayGuard" = field(default_factory=security.ReplayGuard)
 
     # --- seeing trouble coming (Phase 4) ---
     conflicts: List[Conflict] = field(default_factory=list)
@@ -121,6 +129,29 @@ class Robot:
     _charge_slot: Optional[tuple] = None
     _charge_checked_at: float = -99.0
     _charge_wanted: bool = False
+
+    # --- driven entirely by a central boss, not itself (Phase 18) ---
+    # True means: do not plan, do not bid, do not reroute. Follow the last
+    # route the boss actually sent, and nothing else -- exactly the
+    # architecture this mode exists to test the fragility of.
+    centrally_controlled: bool = False
+    _central_task_seen: Optional[str] = None   # last task_id actually RECEIVED
+    _central_path_seen: Optional[tuple] = None # last route actually ADOPTED
+
+    # --- people on the floor (Phase 22) ---
+    # human_id -> (x, y, sensed_at). Sensed locally, exactly like local_contacts
+    # -- never from a message, because a safety system built around people
+    # cannot depend on the network staying up.
+    _known_humans: Dict[str, tuple] = field(default_factory=dict)
+    near_person: Optional[str] = None       # who, if anyone, we are slowing for
+
+    # --- is it starting to struggle? (Phase 23) ---
+    health_score: float = 100.0
+    health_band: str = HEALTHY
+    health_reasons: List[str] = field(default_factory=list)
+    _reroute_times: "deque" = field(default_factory=deque)
+    _backout_times: "deque" = field(default_factory=deque)
+    _last_health_check: float = -99.0
     blocked_by: Optional[str] = None
     waiting_since: Optional[float] = None
     wait_time: float = 0.0          # total seconds spent held up
@@ -287,6 +318,31 @@ class Robot:
         if self.halted:
             self.status = (RobotStatus.WAITING if self.path or self.goal
                            else RobotStatus.IDLE)
+            return
+
+        # Phase 18. Driven by a central boss, not itself: it does not plan,
+        # does not replan around anything it notices, and does not ask for
+        # work. It runs the route it was last actually TOLD to run, and
+        # nothing more -- arrival detection is the one piece of "thinking"
+        # left, because recognising you have stopped moving is not
+        # intelligence, it is just noticing.
+        if self.centrally_controlled:
+            if self.goal is None:
+                self.status = RobotStatus.IDLE
+                return
+            if self.cell == self.goal and not self.path and self._progress == 0.0:
+                self.goal = None
+                self.status = RobotStatus.IDLE
+                self._progress = 0.0
+                return
+            if self.path:
+                if not self.hold:
+                    self.status = RobotStatus.MOVING
+            else:
+                # Has somewhere to be but nothing to drive there with yet --
+                # waiting on the boss, the same as a robot waiting on
+                # anything else.
+                self.status = RobotStatus.WAITING
             return
 
         # Nothing to do.
@@ -503,9 +559,61 @@ class Robot:
     # information about the world means more caution, not the same caution.
     SAFE_MODE_SPEED_FACTOR = 0.5
 
+    # --- Phase 22: never enter a person's space, always slow down near one ---
+    PERSON_STOP_RADIUS = 1.3    # a hard line. Never crossed, whatever else is
+                                 # happening -- checked every tick, in BOTH
+                                 # fleets, the same as the robot-robot reflex.
+    PERSON_SLOW_RADIUS = 3.0    # begin easing off well before that line
+    PERSON_SENSE_RANGE = 4.0    # how far the "LiDAR" for people reaches --
+                                 # wider than SENSOR_RANGE for ordinary
+                                 # obstacles on purpose: a person deserves
+                                 # earlier warning than a dropped box does.
+    PERSON_MIN_SPEED = 0.35     # floor on the slow-down ramp -- crawl, but
+                                 # keep making progress, right up to the point
+                                 # the hard stop takes over completely.
+    PERSON_BLOCK_TTL = 1.2      # how long a sensed person's square (and the
+                                 # ones next to it) stay marked "in the way"
+                                 # for ROUTING. Short and constantly renewed
+                                 # while they are near, so the map does not
+                                 # carry a phantom wall once they walk off.
+
     def travel_speed(self) -> float:
-        """How fast it is allowed to drive right now."""
-        return self.speed * (self.SAFE_MODE_SPEED_FACTOR if self.safe_mode else 1.0)
+        """How fast it is allowed to drive right now.
+
+        Network trouble halves it. Being near a person on top of that eases it
+        down further still, the closer they are -- multiplied together, so a
+        robot already cautious about the network is MORE cautious near a
+        person, never less.
+        """
+        speed = self.speed * (self.SAFE_MODE_SPEED_FACTOR if self.safe_mode else 1.0)
+        return speed * self._person_speed_factor()
+
+    def _nearest_person(self, x: float, y: float) -> Optional[tuple]:
+        """(distance, human_id) to the closest person we currently know
+        about, or None if we do not know of any."""
+        best = None
+        for human_id, (hx, hy, _seen) in self._known_humans.items():
+            d = ((hx - x) ** 2 + (hy - y) ** 2) ** 0.5
+            if best is None or d < best[0]:
+                best = (d, human_id)
+        return best
+
+    def _person_speed_factor(self) -> float:
+        """1.0 far from anyone, ramping straight down to PERSON_MIN_SPEED by
+        the time the hard stop line is reached."""
+        nearest = self._nearest_person(self.x, self.y)
+        self.near_person = None
+        if nearest is None:
+            return 1.0
+        dist, human_id = nearest
+        if dist >= self.PERSON_SLOW_RADIUS:
+            return 1.0
+        self.near_person = human_id
+        span = self.PERSON_SLOW_RADIUS - self.PERSON_STOP_RADIUS
+        if span <= 0:
+            return self.PERSON_MIN_SPEED
+        t = max(0.0, min(1.0, (dist - self.PERSON_STOP_RADIUS) / span))
+        return self.PERSON_MIN_SPEED + t * (1.0 - self.PERSON_MIN_SPEED)
 
     def current_velocity(self) -> float:
         """How fast it is ACTUALLY going, right now.
@@ -535,29 +643,59 @@ class Robot:
             priority=self.priority, status=self.status.value,
         )
 
-    def communicate(self, bus, now: float) -> None:
+    def communicate(self, bus, now: float) -> List[str]:
         """Listen first, then speak. Called once per tick by the world.
 
         The listening half is identical on a real robot. The speaking half is
         identical too -- only the bus underneath changes.
         """
         if bus is None:
-            return
+            return []
 
-        # 1. Read the inbox.
+        # 1. Read the inbox. Phase 23: check every message BEFORE the brain
+        # reads it -- a forged or replayed one never reaches fleet.ingest or
+        # anything downstream of it. Rejection is not silent: it goes into
+        # the returned notes, the same as any other decision worth logging.
+        notes: List[str] = []
         for message in bus.poll(self.robot_id):
+            claimed = getattr(message, "robot_id", "?")
+            kind = getattr(message, "type", "?")
+            # Almost always the same as claimed -- see TaskClaim.sender for
+            # the one case where a robot speaks about a PEER rather than
+            # itself. Replay protection has to key on whoever's counter the
+            # sequence number actually came from, or a legitimate message
+            # about someone else reads as an impostor in THEIR sequence.
+            sender = getattr(message, "sender", "") or claimed
+
+            sig = security.check_signature(message)
+            if not sig:
+                self.messages_rejected += 1
+                notes.append(f"{self.robot_id} rejected a {kind} claiming to "
+                            f"be from {claimed} - {sig.reason}")
+                continue
+
+            fresh = self._replay_guard.check(
+                sender, getattr(message, "seq", 0),
+                getattr(message, "timestamp", 0.0), now)
+            if not fresh:
+                self.messages_rejected += 1
+                notes.append(f"{self.robot_id} rejected a {kind} from "
+                            f"{claimed} - {fresh.reason}")
+                continue
+
             self.fleet.ingest(message, now)
             self._ingest_reservation(message)
             self._ingest_jam_news(message, now)
             self._ingest_blocked_aisle(message, now)
             self._ingest_task_news(message, now)
+            self._ingest_central_command(message, now)
             self.messages_heard += 1
             # Anything at all arriving means the radio is alive.
             self.last_heard_any = now
             self._ever_heard = True
 
         if self.status is RobotStatus.FAILED:
-            return
+            return notes
 
         if self._resync_pending:
             self._resync(bus, now)
@@ -568,6 +706,7 @@ class Robot:
             self._publish(bus, Heartbeat(
                 robot_id=self.robot_id, timestamp=now, seq=self.seq,
                 battery=self.battery, status=self.status.value,
+                health=self.health_band,
             ))
 
         # 3. Pose -- "this is where I am", often, because it changes fast.
@@ -621,9 +760,12 @@ class Robot:
                 priority=self.priority, is_moving=self.current_velocity() > 0.0,
             ))
 
+        return notes
+
     def _publish(self, bus, message) -> None:
         self.seq += 1
         self.messages_sent += 1
+        security.seal(message)          # Phase 23: sign it, then let it go
         bus.publish(message)
 
     # ------------------------------------ seeing trouble coming (Phase 4)
@@ -725,8 +867,21 @@ class Robot:
         which is the whole point of the comparison.
         """
         self.blocked_by = None
-        if self.status is RobotStatus.FAILED or not self.path:
+        if self.status is RobotStatus.FAILED:
             self._set_hold(False, now, dt)
+            return
+
+        if not self.path:
+            # Phase 22. Parked does not mean safe: nothing about NOT having a
+            # route stops a person walking up to where we are standing. A
+            # person near a robot that never checks anything is exactly the
+            # gap that let one through in testing -- an idle robot with no
+            # path simply never looked. So look anyway, at our own square,
+            # even with nowhere to go.
+            person = self._human_too_close(self.cell, now)
+            self._set_hold(person is not None, now, dt, emergency=True)
+            if person is not None:
+                self.blocked_by = f"person:{person}"
             return
 
         nxt = self.path[0]
@@ -806,6 +961,7 @@ class Robot:
         self._reroute_at = now
         self._resume_at = now + 1.0 + self._saw_rng.random() * 3.0
         self.reroutes += 1
+        self._reroute_times.append(now)
         return f"{self.robot_id} backed off to ({spot.x}, {spot.y}) - stuck too long"
 
     # --------------------------------------- booking squares (Phase 5)
@@ -1013,8 +1169,19 @@ class Robot:
         """
         self.blocked_by = None
 
-        if self.status is RobotStatus.FAILED or not self.path:
+        if self.status is RobotStatus.FAILED:
             self._set_hold(False, now, dt)
+            return
+
+        if not self.path:
+            # Phase 22. Same reasoning as stop_and_wait_check(): an idle
+            # robot with no route never used to check anything at all, so a
+            # person could walk right up to a parked robot with nothing
+            # noticing until the very last instant, if at all.
+            person = self._human_too_close(self.cell, now)
+            self._set_hold(person is not None, now, dt, emergency=True)
+            if person is not None:
+                self.blocked_by = f"person:{person}"
             return
 
         nxt = self.path[0]
@@ -1063,6 +1230,20 @@ class Robot:
         a different moment and meet in the middle. Measuring the real gap
         closes that hole.
         """
+        # Phase 22. Checked FIRST, and unconditionally -- a person is never
+        # part of the right-of-way contest below. There is no priority, no
+        # negotiation, no "they are parked so I can go": too close to a
+        # person always means stop, full stop. Checked against both the
+        # square about to be entered AND this robot's own actual position,
+        # which the robot-contact checks below only do for `nxt` -- a person
+        # can be close to the robot's real, in-between-squares body even when
+        # the target square itself is still clear.
+        blocking_person = self._human_too_close(nxt, now)
+        if blocking_person is not None:
+            self.blocked_by = f"person:{blocking_person}"
+            self._set_hold(True, now, dt, emergency=True)
+            return True
+
         for contact in self._all_contacts(now):
             # Where it was when it last spoke, AND where it has probably got to
             # since. Checking only the first was how a robot already part way
@@ -1109,6 +1290,16 @@ class Robot:
                 return True
 
         return False
+
+    def _human_too_close(self, nxt: Cell, now: float) -> Optional[str]:
+        """Is any known person within the hard stop line -- of the square we
+        are about to enter, or of where our own body actually is right now?"""
+        for human_id, (hx, hy, _seen) in self._known_humans.items():
+            for px, py in ((nxt.x, nxt.y), (self.x, self.y)):
+                gap_x, gap_y = hx - px, hy - py
+                if gap_x * gap_x + gap_y * gap_y < self.PERSON_STOP_RADIUS ** 2:
+                    return human_id
+        return None
 
     def _all_contacts(self, now: float) -> List[Dict[str, object]]:
         """Every other robot this one knows about, however it found out.
@@ -1200,6 +1391,21 @@ class Robot:
             if self.status is RobotStatus.WAITING and self.path:
                 self.status = RobotStatus.MOVING
 
+    def geometry_brake(self, now: float, dt: float, other_id: str) -> None:
+        """Forced to a hard stop by World._enforce_geometry_gap (Phase 19) --
+        physically too close to another robot's ACTUAL position, regardless
+        of what square booking, negotiation, or a central command decided.
+
+        The same kind of hard, unnegotiated stop _human_too_close() already
+        uses: no priority, no reasoning about who goes first, just "too
+        close -- stop." Whichever robot in the pair is mid-segment (at least
+        one always is, or they would not have been close enough to trigger
+        this) is left exactly where back_out_if_wedged() already knows how
+        to find it.
+        """
+        self.blocked_by = other_id
+        self._set_hold(True, now, dt, emergency=True)
+
     BACK_OUT_AFTER = 3.0        # wedged this long mid-segment, so reverse
 
     def back_out_if_wedged(self, now: float) -> Optional[str]:
@@ -1220,6 +1426,7 @@ class Robot:
             return None
 
         self._reversing = True
+        self._backout_times.append(now)
         self._suspended_goal = self._suspended_goal or self.goal
         return (f"{self.robot_id} was wedged part way into "
                 f"({self.path[0].x}, {self.path[0].y}) - backing out")
@@ -1365,6 +1572,7 @@ class Robot:
         self.path = new_path
         self.replans += 1
         self.reroutes += 1
+        self._reroute_times.append(now)
         self.status = RobotStatus.REROUTING
         self._reroute_at = now
         # Its old bookings are stale now. Keep it still for one tick; the next
@@ -1651,6 +1859,55 @@ class Robot:
                 if task.assigned_robot == message.robot_id:
                     task.release()
 
+    def _ingest_central_command(self, message, now: float) -> None:
+        """Phase 18. The ONE message a centrally-planned robot acts on: "do
+        this job, drive exactly this route." Not for us, ignored -- the boss
+        addresses every robot on the floor, same as any broadcast.
+
+        Building a fresh local Task from the message, rather than reaching
+        into a shared object somewhere, is deliberate: it is the SAME thing
+        _ingest_task_news() already does for TaskAnnounce, and it means a
+        centrally-controlled robot knows only what it has actually been
+        told, exactly like every other robot in this project.
+
+        The boss RESENDS a command it has not seen confirmed, the same way
+        _reannounce_forgotten_tasks() already does for orders -- the network
+        it travels over can lose a message just as easily as any other. A
+        resend carries the identical path as before, and adopting it again
+        would reset _progress to 0 while the robot is honestly part way
+        across a square, snapping it backwards onto the square behind it --
+        exactly the teleport this project has broken on before. So the new
+        path is only ever adopted when it is actually DIFFERENT from the one
+        already being driven, never merely because a message arrived.
+        """
+        if not isinstance(message, CentralCommand):
+            return
+        if message.robot_id != self.robot_id:
+            return
+
+        route = tuple(message.path)
+        if route == self._central_path_seen:
+            return                      # a resend of what we are already doing
+
+        if message.task_id and message.task_id != self._central_task_seen:
+            self._central_task_seen = message.task_id
+            task = Task(
+                task_id=message.task_id,
+                pickup=Cell(*message.pickup), dropoff=Cell(*message.dropoff),
+                product=message.product, priority=5,
+                created_at=now, announced_at=now,
+                assigned_robot=self.robot_id, status=TaskStatus.ASSIGNED,
+            )
+            self.board.add(task)
+            self.staging = None
+            self.staging_why = ""
+            self.task = task
+
+        self._central_path_seen = route
+        self.path = [Cell(x, y) for x, y in message.path]
+        self.goal = self.path[-1] if self.path else None
+        self._progress = 0.0
+
     def work_on_tasks(self, grid: Grid, bus, now: float) -> List[str]:
         """Bid for jobs, claim what we win, and get on with it."""
         notes = self._task_notes
@@ -1673,6 +1930,17 @@ class Robot:
         if self.charger is not None or self.status is RobotStatus.CHARGING:
             return notes
 
+        # Phase 18. Driven by a central boss: it does not bid (there is no
+        # auction to bid into -- the boss decides, alone, with everything it
+        # can see), and it does not reassign a quiet peer's job (it has no
+        # peer relationship with anyone to notice that with). It only ever
+        # does the one thing any robot does once it is actually carrying
+        # something: finish the trip.
+        if self.centrally_controlled:
+            if self.task is not None:
+                notes += self._progress_task(grid, bus, now)
+            return notes
+
         # A peer has gone quiet while holding a job. Put it back up for
         # auction -- 06_TASK_ALLOCATION section 4. Whoever notices first does
         # it; a repeat is harmless because the job keeps its id.
@@ -1689,8 +1957,14 @@ class Robot:
                     notes.append(f"{note.robot_id} has gone quiet - "
                                  f"{task.task_id} back up for auction")
                     if bus is not None:
+                        # Phase 23: robot_id names the quiet robot, so the
+                        # release matches its held task on every board -- but
+                        # `sender` names US, the one actually speaking, since
+                        # `seq` below comes from OUR OWN counter and only
+                        # means something as part of OUR sequence, not theirs.
                         self._publish(bus, TaskClaim(
-                            robot_id=note.robot_id, timestamp=now, seq=self.seq,
+                            robot_id=note.robot_id, sender=self.robot_id,
+                            timestamp=now, seq=self.seq,
                             task_id=task.task_id, action="RELEASE"))
 
         if self.task is not None:
@@ -1819,6 +2093,16 @@ class Robot:
                 grid, now, [task.pickup, task.dropoff]):
             return None
 
+        # Phase 23. CRITICAL health means struggling right now -- stuck a
+        # long time, or its radio has gone quiet, or it keeps having to
+        # replan. Doc 23's own maintenance policy says "reduce new task
+        # assignments" before things get worse, so it stops bidding for NEW
+        # work. It still finishes whatever it is already carrying: this only
+        # ever affects which robot a job goes to, never a robot mid-delivery,
+        # and touches nothing about how it drives or gives way.
+        if self.health_band == HEALTH_CRITICAL:
+            return None
+
         congestion = float(len(blocked)) + len(self.fleet.fresh(now)) * 0.5
         return bid_cost(
             distance_to_pickup=len(to_pickup) - 1,
@@ -1937,6 +2221,39 @@ class Robot:
                 del self._contact_since[key]
         for key in here:
             self._contact_since.setdefault(key, now)
+
+    def sense_humans(self, people: Iterable[tuple], now: float) -> None:
+        """What this robot can see of the people nearby. No messages -- the
+        same local-sensor pattern as sense_robots(), for the same reason:
+        cutting the network must never mean a robot stops noticing a person.
+
+        `people` is (human_id, x, y, cell) tuples already filtered to sensor
+        range by the world -- the simulator plays the part of the scanner.
+
+        Two things happen here, and they serve different purposes:
+          * `_known_humans` feeds the HARD safety stop and the speed ramp,
+            checked fresh every tick, in both fleets;
+          * marking the person's square (and its four neighbours) in
+            blocked_map feeds ROUTING -- the exact same mechanism a dropped
+            box uses, so "reroute around a person" is not new logic, it is
+            this old logic fed a new kind of thing to avoid. Marked with a
+            short TTL and re-marked every tick they stay in range, so it
+            fades within about a second of them moving on -- never broadcast,
+            never confused with a real, static obstacle.
+        """
+        seen_ids = set()
+        for human_id, x, y, cell in people:
+            seen_ids.add(human_id)
+            self._known_humans[human_id] = (x, y, now)
+            for nb in (cell, Cell(cell.x + 1, cell.y), Cell(cell.x - 1, cell.y),
+                      Cell(cell.x, cell.y + 1), Cell(cell.x, cell.y - 1)):
+                self.blocked_map.mark(nb, f"person:{human_id}", now,
+                                      ttl=self.PERSON_BLOCK_TTL)
+        # Forget anyone no longer in range -- they may just have walked off,
+        # not vanished, so this is a plain drop, not a "cleared" report.
+        for human_id in list(self._known_humans):
+            if human_id not in seen_ids:
+                del self._known_humans[human_id]
 
     def known_occupied(self, now: float) -> List[Cell]:
         """Squares that have a robot on them, from BOTH sources.
@@ -2418,6 +2735,42 @@ class Robot:
                        else RobotStatus.WAITING)
         return f"{self.robot_id} is charged ({self.battery:.0f}%) and back on the job"
 
+    # --------------------------------------------- Phase 23: how it is doing
+
+    HEALTH_RECHECK = 2.0     # seconds between recomputing the score
+
+    def update_health(self, now: float) -> Optional[str]:
+        """Recompute the health score from what this robot has actually
+        measured about itself. Returns a note only when the BAND changes, so
+        the event feed says something when it matters and stays quiet the
+        rest of the time.
+        """
+        if now - self._last_health_check < self.HEALTH_RECHECK:
+            return None
+        self._last_health_check = now
+
+        cutoff = now - INCIDENT_WINDOW
+        while self._reroute_times and self._reroute_times[0] < cutoff:
+            self._reroute_times.popleft()
+        while self._backout_times and self._backout_times[0] < cutoff:
+            self._backout_times.popleft()
+
+        report = compute_health(
+            battery=self.battery,
+            stalled_for=self.stalled_for(now) if self.goal is not None else 0.0,
+            comms_silence=self.link_quiet_for(now),
+            reroutes_recent=len(self._reroute_times),
+            backouts_recent=len(self._backout_times),
+        )
+        was = self.health_band
+        self.health_score, self.health_band, self.health_reasons = (
+            report.score, report.band, report.reasons)
+        if self.health_band == was:
+            return None
+        arrow = "v" if BANDS.index(self.health_band) > BANDS.index(was) else "^"
+        return (f"{self.robot_id} health {was} -> {self.health_band} "
+                f"({self.health_score:.0f}/100) {arrow} {report.sentence()}")
+
     def manage_battery(self, grid: Grid, bus, now: float) -> Optional[str]:
         """Decide about charge. Called once per tick, before anything moves."""
         if self.status is RobotStatus.FAILED or self.halted:
@@ -2479,6 +2832,11 @@ class Robot:
             "robot_id": self.robot_id,
             "halted": self.halted,
             "charging": self.status is RobotStatus.CHARGING,
+            "health_score": round(self.health_score, 1),
+            "health_band": self.health_band,
+            "health_reasons": self.health_reasons,
+            "messages_rejected": self.messages_rejected,
+            "near_person": self.near_person,
             "staging": [self.staging.x, self.staging.y] if self.staging else None,
             "staging_why": self.staging_why,
             "charger": [self.charger.x, self.charger.y] if self.charger else None,

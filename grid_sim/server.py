@@ -231,6 +231,21 @@ class Simulation:
         with self.lock:
             return self.world.drain_batteries()
 
+    def attack(self) -> dict:
+        """Phase 23's own demo: try to inject a forged message and watch the
+        fleet reject it -- no signature, so nothing else about it matters."""
+        with self.lock:
+            return self.world.simulate_fake_message()
+
+    def human(self, action: str) -> dict:
+        """+ Add person / - Remove person."""
+        with self.lock:
+            if action == "add":
+                return self.world.add_human()
+            if action == "remove":
+                return self.world.remove_human()
+            return {"ok": False, "message": f"'{action}' is not add or remove."}
+
     def set_focus(self, robot_id) -> dict:
         """The dashboard says which robot it is showing, so we can stop sending
         the other nineteen robots' worth of detail that it throws away."""
@@ -348,7 +363,7 @@ class Handler(BaseHTTPRequestHandler):
                              "/api/silence", "/api/network", "/api/obstacle",
                              "/api/power", "/api/compare", "/api/cut",
                              "/api/fleet", "/api/rate", "/api/focus",
-                             "/api/battery"):
+                             "/api/battery", "/api/attack", "/api/human"):
             self._send_json({"error": "not found"}, status=404)
             return
         try:
@@ -378,6 +393,10 @@ class Handler(BaseHTTPRequestHandler):
                                            body.get("x", 0), body.get("y", 0))
             elif self.path == "/api/battery":
                 result = self.sim.drain_batteries()
+            elif self.path == "/api/human":
+                result = self.sim.human(body.get("action", "add"))
+            elif self.path == "/api/attack":
+                result = self.sim.attack()
             elif self.path == "/api/focus":
                 result = self.sim.set_focus(body.get("robot_id"))
             elif self.path == "/api/rate":
@@ -453,6 +472,11 @@ class Handler(BaseHTTPRequestHandler):
 def serve(world: Optional[World] = None, port: int = 8000, host: str = "127.0.0.1"):
     """Start the simulation and the web server. Blocks until Ctrl+C."""
     sim = Simulation(world if world is not None else phase2_world())
+    # Phase 21. Off by default everywhere else (it changes which square an
+    # order actually collects from -- see OrderGenerator.tick()), but the
+    # live dashboard is exactly where a judge should be able to watch it
+    # happen and read why.
+    sim.world.reslotting_enabled = True
     sim.start()
 
     compare = ComparisonRunner()

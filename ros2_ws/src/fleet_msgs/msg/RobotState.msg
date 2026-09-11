@@ -6,6 +6,7 @@
 string robot_id
 builtin_interfaces/Time stamp
 uint32 seq                  # counts up; a gap proves a message was lost
+string tag                  # Phase 23: HMAC signature -- see security.py
 
 float64 x                   # grid coordinates, not metres. See translate.py.
 float64 y

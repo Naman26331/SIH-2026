@@ -93,8 +93,29 @@ class InMemoryBus(FleetBus):
     def register(self, robot_id: str) -> None:
         self._inboxes.setdefault(robot_id, deque())
 
+    def unregister(self, robot_id: str) -> None:
+        """A robot has left for good. Forget its inbox.
+
+        Without this, every message the rest of the fleet ever sends keeps
+        being queued for a name nobody is polling any more -- silently, for
+        as long as the simulation runs. If a new robot later joins under the
+        SAME reused name, it is handed that entire backlog in one go the
+        moment it registers, some of it many seconds old, which the security
+        layer correctly refuses as stale. The bug is not the refusal; it is
+        that the backlog was ever allowed to build up for a name nothing was
+        listening on.
+        """
+        self._inboxes.pop(robot_id, None)
+
     def publish(self, message: Any) -> None:
-        sender = getattr(message, "robot_id", None)
+        # Almost always the same thing: robot_id IS the sender. The two
+        # exceptions -- a robot releasing a PEER's job on its behalf (Phase
+        # 23), and the central boss addressing a named robot (Phase 18) --
+        # carry an explicit `sender` because robot_id means something else
+        # for them ("whose task this is", "who this is FOR"). Routing on the
+        # wrong one silently excluded the one robot a central command was
+        # actually addressed to from ever receiving it.
+        sender = getattr(message, "sender", None) or getattr(message, "robot_id", None)
         self.sent += 1
         self.recent.append(message)
 
@@ -140,6 +161,30 @@ class InMemoryBus(FleetBus):
     def reset_stats(self) -> None:
         self.sent = self.delivered = self.dropped = 0
         self.recent.clear()
+
+    def reset_clock(self, now: float = 0.0) -> None:
+        """Snap the bus's own clock back to match a restarted simulation, and
+        throw away anything still queued.
+
+        Without this, a message published in the FIRST tick after the world's
+        clock is rewound is stamped for delivery using the bus's OLD, not-yet
+        -caught-up time -- because the scenario code that publishes it runs
+        BEFORE world.tick() calls set_time() for the new tick. The message
+        then sits queued until sim_time climbs back up to where the bus clock
+        used to be, and arrives late, out of order relative to everything
+        published normally afterwards. Found by Phase 23's replay guard,
+        which is honest about out-of-order delivery in a way nothing was
+        before it -- but the desync itself predates that layer entirely, and
+        this is the actual fix, not a workaround for it.
+
+        Anything still in flight also refers to a world that reset_counters()
+        just wiped -- bookings, boards, tasks -- so there is nothing sensible
+        left for it to say. Clearing it is not losing information, it is
+        matching the state the rest of the world just moved to.
+        """
+        self._now = now
+        for inbox in self._inboxes.values():
+            inbox.clear()
 
     def stats(self) -> Dict[str, Any]:
         return {

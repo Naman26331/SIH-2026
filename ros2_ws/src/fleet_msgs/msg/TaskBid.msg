@@ -7,6 +7,7 @@
 string robot_id
 builtin_interfaces/Time stamp
 uint32 seq
+string tag                  # Phase 23: HMAC signature -- see security.py
 
 string task_id
 float64 cost

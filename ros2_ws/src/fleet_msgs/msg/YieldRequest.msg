@@ -7,6 +7,7 @@
 string robot_id             # who is asking
 builtin_interfaces/Time stamp
 uint32 seq
+string tag                  # Phase 23: HMAC signature -- see security.py
 
 string target               # who is being asked to move
 int32[2] resource           # the square wanted

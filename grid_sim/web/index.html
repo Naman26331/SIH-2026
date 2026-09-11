@@ -180,6 +180,19 @@
   .why{color:var(--muted); line-height:1.4; margin-top:6px}
   .why b{color:#A78BFA}
   #batts{max-height:180px; overflow-y:auto}
+  #healths{max-height:170px; overflow-y:auto; font-size:11px}
+  #people{max-height:140px; overflow-y:auto; font-size:11px}
+  .prow{display:flex; align-items:center; gap:6px; padding:2px 0}
+  .prow b{width:26px; flex:none; color:#F5A623}
+  .prow .st{flex:1; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+  .hrow{display:flex; align-items:center; gap:6px; padding:2px 0}
+  .hrow b{width:26px; flex:none}
+  .hrow .dot{width:8px; height:8px; border-radius:50%; flex:none}
+  .hrow .band{width:88px; flex:none; font-size:10px}
+  .hrow .why{color:var(--muted); flex:1; overflow:hidden; text-overflow:ellipsis;
+             white-space:nowrap; font-size:10px}
+  #security{font-size:11px; color:var(--muted); line-height:1.5}
+  #security b{color:var(--text)}
   .batt{display:flex; align-items:center; gap:6px; font-size:11px; padding:1px 0}
   .batt b{width:26px; flex:none}
   .batt .bar{flex:1; height:7px; background:#1B2531; border-radius:3px; overflow:hidden}
@@ -240,6 +253,11 @@
   .decisions div{color:var(--muted); display:flex; gap:7px; line-height:1.45}
   .decisions time{color:var(--dim); flex:none}
   .decisions .none{color:var(--dim)}
+  .slotmoves{font-family:var(--mono); font-size:10.5px; display:flex; flex-direction:column; gap:5px}
+  .slotmoves div{color:var(--muted); display:flex; gap:7px; line-height:1.45}
+  .slotmoves time{color:var(--dim); flex:none}
+  .slotmoves .none{color:var(--dim)}
+  .slotmoves .gain{color:var(--green)}
   .log div.gave span{color:var(--violet)}
 
   /* ---------- Phase 5: reservations ---------- */
@@ -275,6 +293,7 @@
   .noconf{color:var(--dim); font-family:var(--mono); font-size:11px}
 
   .log div.pred span{color:var(--amber)}
+  .log div.slot span{color:var(--amber)}
 
   /* ---------- Phase 3: comms ---------- */
   .toggles{display:flex; flex-direction:column; gap:6px}
@@ -372,6 +391,10 @@
           <button data-scen="orders">Start orders</button>
           <button data-scen="stop">Stop all</button>
         </div>
+        <div class="btns" style="margin-bottom:7px">
+          <button data-human="add">&#128694; Add person</button>
+          <button data-human="remove">&#128694; Remove person</button>
+        </div>
         <div class="slider" style="margin:0">
           <label>Order rate</label>
           <input type="range" id="rate" min="1" max="24" step="1" value="16">
@@ -385,6 +408,11 @@
       </div>
 
       <div class="sec">
+        <h2>People <em id="peopleNote"></em></h2>
+        <div id="people"></div>
+      </div>
+
+      <div class="sec">
         <h2>Power <em>&mdash; fail one and watch the others cover</em></h2>
         <div class="power" id="power"></div>
       </div>
@@ -395,11 +423,21 @@
       </div>
 
       <div class="sec">
+        <h2>Stock, moving itself closer <em id="slotNote"></em></h2>
+        <div class="slotmoves" id="reslotting"></div>
+      </div>
+
+      <div class="sec">
         <h2>Battery <em id="battNote"></em></h2>
         <div class="btns" style="margin-bottom:8px">
           <button class="wide" id="drainBtn">&#9211; Drain batteries</button>
         </div>
         <div id="batts"></div>
+      </div>
+
+      <div class="sec">
+        <h2>Robot health <em id="healthNote"></em></h2>
+        <div id="healths"></div>
       </div>
 
       <div class="sec">
@@ -471,6 +509,14 @@
       </div>
 
       <div class="sec">
+        <h2>Security <em id="secNote"></em></h2>
+        <div class="btns" style="margin-bottom:8px">
+          <button class="wide" id="attackBtn">&#128272; Inject a fake message</button>
+        </div>
+        <div id="security"></div>
+      </div>
+
+      <div class="sec">
         <h2>What <span id="viewOwner">R1</span> can hear</h2>
         <div class="sees" id="sees"></div>
         <div class="msgs" id="msgs" style="margin-top:11px"></div>
@@ -488,6 +534,7 @@
           <div><i class="sw" style="background:#22D3EE"></i> <b>Diamond</b> &mdash; collect this order here, off the shelf beside it</div>
           <div><i class="sw" style="background:#22D3EE"></i> <b>Star</b> &mdash; deliver it here. A star always sits on a packing bay</div>
           <div><i class="sw" style="background:#A78BFA"></i> <b>Dashed ring</b> &mdash; a robot waiting there on a hunch, not a job. See "Where the work is"</div>
+          <div><i class="sw" style="background:#F5A623"></i> <b>Person</b> &mdash; keeps walking on their own. Faint ring is the space no robot will enter</div>
           <div style="color:var(--muted);margin-bottom:4px">Both are drawn in the colour of the robot that won the job.</div>
           <div><i class="sw" style="background:#22D3EE;opacity:.35"></i> Tinted square &mdash; booked by the selected robot</div>
           <div><i class="sw" style="background:#7F1D1D"></i> Hatched red &mdash; obstacle a robot has found</div>
@@ -534,13 +581,17 @@ function colorFor(id){
 let MAP = null;            // the warehouse, fetched once
 
 // Phase 11: rack name -> what is on it, and floor square -> the racks you can
-// reach from it. Built once; the map never changes, so neither do these.
+// reach from it. Built once -- the RACKS never move, only (Phase 21) what is
+// labelled on one, and watchReslotting() below patches that in place on the
+// very same objects, so a hover always reads the current product.
 let SHELF_BY_CELL = new Map();     // "x,y" of the RACK      -> shelf
 let SHELF_BY_FACE = new Map();     // "x,y" of the FLOOR sq  -> [shelves]
+let SHELF_BY_NAME = new Map();     // "A14"                  -> shelf
 function buildShelfIndex(){
-  SHELF_BY_CELL = new Map(); SHELF_BY_FACE = new Map();
+  SHELF_BY_CELL = new Map(); SHELF_BY_FACE = new Map(); SHELF_BY_NAME = new Map();
   for (const sh of (MAP.shelves || [])){
     SHELF_BY_CELL.set(`${sh.cell[0]},${sh.cell[1]}`, sh);
+    SHELF_BY_NAME.set(sh.name, sh);
     const k = `${sh.face[0]},${sh.face[1]}`;
     if (!SHELF_BY_FACE.has(k)) SHELF_BY_FACE.set(k, []);
     SHELF_BY_FACE.get(k).push(sh);
@@ -667,6 +718,10 @@ function connect(){
     renderConflicts();
     renderToggles();
     renderSees();
+    renderHealth();
+    renderSecurity();
+    renderPeople();
+    renderReslotting();
     watchAll(prev);
   };
 }
@@ -675,7 +730,26 @@ function watchAll(prev){
   watchForEvents(prev, STATE);
   watchConflicts(STATE);
   watchDecisions(STATE);
+  watchReslotting(STATE);
   catchCollisions(STATE);
+}
+
+// Phase 21. SHELF_BY_CELL/FACE/NAME were built once from the map, which is
+// fetched only at boot -- but a shelf's PRODUCT can now change while the
+// page stays open. Patching the same objects in place (not replacing them)
+// means every hover, on the rack or on its face, stays honest without
+// re-fetching or rebuilding the whole index.
+let lastSlotAt = -1;
+function watchReslotting(state){
+  const recent = (state.reslotting || {}).recent || [];
+  for (const m of [...recent].reverse()){       // oldest-new first
+    if (m.at <= lastSlotAt) continue;
+    lastSlotAt = m.at;
+    const to = SHELF_BY_NAME.get(m.to_shelf);
+    const from = SHELF_BY_NAME.get(m.from_shelf);
+    if (to) to.product = m.product;
+    if (from) from.product = m.displaced_product;
+  }
 }
 
 function setLive(on){
@@ -703,11 +777,51 @@ window.addEventListener("resize", () => { if (MAP) layout(); });
 function draw(){
   if (MAP){
     drawMap();
-    if (STATE){ drawBookings(); drawObstacles(); drawJobs(); drawStaging(); drawBeliefs(); drawPaths(); drawGoals(); drawConflicts(); drawRobots(); }
+    if (STATE){ drawBookings(); drawObstacles(); drawJobs(); drawStaging(); drawBeliefs(); drawPaths(); drawGoals(); drawConflicts(); drawHumans(); drawRobots(); }
     drawBursts();
     drawHover();
   }
   requestAnimationFrame(draw);
+}
+
+// Phase 22. People are drawn in a shape and colour no robot ever uses --
+// warm amber, a head-and-shoulders glyph instead of a ring -- so nobody
+// mistakes one for a robot at a glance. The faint ring around them is their
+// safety bubble: the square any robot will stop short of, drawn to scale.
+const PERSON_COLOUR = "#F5A623";
+function drawHumans(){
+  for (const p of (STATE.humans || [])){
+    const cx = p.x*CELL + CELL/2, cy = p.y*CELL + CELL/2;
+    ctx.save();
+
+    // the safety bubble, faint, to scale with PERSON_STOP_RADIUS (1.3 sq)
+    ctx.globalAlpha = .10; ctx.fillStyle = PERSON_COLOUR;
+    ctx.beginPath(); ctx.arc(cx, cy, CELL*1.3, 0, Math.PI*2); ctx.fill();
+    ctx.globalAlpha = .30; ctx.strokeStyle = PERSON_COLOUR; ctx.lineWidth = 1;
+    ctx.setLineDash([3,3]);
+    ctx.beginPath(); ctx.arc(cx, cy, CELL*1.3, 0, Math.PI*2); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // a head-and-shoulders glyph -- deliberately not a circle-with-a-ring,
+    // so it can never be confused with a robot even in a screenshot
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = PERSON_COLOUR;
+    ctx.beginPath(); ctx.arc(cx, cy - CELL*0.20, CELL*0.16, 0, Math.PI*2); ctx.fill();
+    ctx.beginPath();
+    ctx.arc(cx, cy + CELL*0.30, CELL*0.30, Math.PI, 0, true);
+    ctx.fill();
+
+    ctx.strokeStyle = "#0A0E13"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.arc(cx, cy - CELL*0.20, CELL*0.16, 0, Math.PI*2); ctx.stroke();
+
+    if (CELL >= 16){
+      ctx.fillStyle = PERSON_COLOUR;
+      ctx.font = `600 ${Math.round(CELL*0.28)}px ui-monospace,Menlo,monospace`;
+      ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+      ctx.fillText(p.human_id, cx, cy - CELL*0.42);
+    }
+    ctx.restore();
+  }
 }
 
 function drawMap(){
@@ -1295,6 +1409,11 @@ document.getElementById("drainBtn").addEventListener("click", async () => {
   showHint(out.message); log(out.message);
 });
 
+document.getElementById("attackBtn").addEventListener("click", async () => {
+  const out = await post("/api/attack", {});
+  showHint(out.message); log(out.message);
+});
+
 async function post(url, body){
   const res = await fetch(url, {
     method:"POST", headers:{"Content-Type":"application/json"},
@@ -1415,6 +1534,107 @@ function renderDemand(){
         ? moved.map(r => `<div class="why">&rarr; <b style="color:${colorFor(r.robot_id)}">${
             r.robot_id}</b> ${r.staging_why}</div>`).join("")
         : `<div class="why">nobody is idle enough to move on it</div>`));
+}
+
+// Phase 21. The SAME learning Phase 12 already does, kept for products
+// instead of aisles, and acted on: when one product clearly outsells the
+// rest and its shelf is not already close to packing, it trades places
+// with a shelf that is close but is not selling much. Shown as the exact
+// numbers it moved on, so "why" is checkable, not a black box -- the same
+// idea renderDemand() already follows.
+function renderReslotting(){
+  const r = STATE.reslotting || {};
+  const note = document.getElementById("slotNote");
+  const recent = r.recent || [];
+
+  if (!r.ready){
+    note.textContent = `— learning (${r.orders_seen || 0} orders so far)`;
+    setHTML("reslotting", `<div class="none">not enough orders yet to have an opinion</div>`);
+    return;
+  }
+  note.textContent = r.busiest ? `— ${r.busiest} sells the most` : "— nothing stands out";
+
+  setHTML("reslotting",
+    (r.reason ? `<div class="why">${r.reason}</div>` : "")
+    + (recent.length
+        ? recent.map(m => `<div>
+            <time>${m.at.toFixed(0)}s</time>
+            <span><b>${m.product}</b> &nbsp;<span class="shelf">${m.from_shelf}</span>
+              &rarr; <span class="shelf">${m.to_shelf}</span>
+              &nbsp;<span class="gain">${m.from_distance.toFixed(0)}&rarr;${m.to_distance.toFixed(0)} sq</span>
+              &nbsp;<span style="color:var(--dim)">(displaced ${m.displaced_product})</span></span>
+          </div>`).join("")
+        : `<div class="none">nothing has needed to move yet</div>`));
+}
+
+// Phase 23a. A colour per health band -- the same idea as the battery bar,
+// green to red, so a struggling robot is visible at a glance before you even
+// read the number.
+const HEALTH_COLOUR = {
+  HEALTHY: "#34D399", WARNING: "#F5B841",
+  SERVICE_SOON: "#FB923C", CRITICAL: "#F87171",
+};
+
+// Phase 22. Each person, and -- in plain words -- which robot, if any, is
+// currently easing off or stopped for them. The robot side already explains
+// itself via near_person; this just reads that back per person.
+function renderPeople(){
+  const people = STATE.humans || [];
+  document.getElementById("peopleNote").textContent =
+    people.length ? `— ${people.length} on the floor` : "— none yet";
+
+  const watching = {};
+  for (const r of (STATE.robots || [])){
+    if (r.near_person) (watching[r.near_person] ||= []).push(r.robot_id);
+  }
+
+  setHTML("people", people.length
+    ? people.map(p => {
+        const near = watching[p.human_id] || [];
+        return `<div class="prow">
+          <b>${p.human_id}</b>
+          <span class="st">(${p.cell[0]}, ${p.cell[1]})${
+            near.length ? ` — ${near.join(", ")} easing off for them` : ""}</span>
+        </div>`;
+      }).join("")
+    : `<div class="none">nobody on the floor — press + Add person</div>`);
+}
+
+function renderHealth(){
+  const robots = STATE.robots || [];
+  const worst = robots.filter(r => r.health_band !== "HEALTHY").length;
+  document.getElementById("healthNote").textContent = worst
+    ? `— ${worst} robot${worst > 1 ? "s" : ""} worth a look`
+    : "— the whole fleet is healthy";
+
+  setHTML("healths", robots.length
+    ? robots.slice().sort((a, b) => a.health_score - b.health_score).map(r => `
+      <div class="hrow">
+        <b style="color:${colorFor(r.robot_id)}">${r.robot_id}</b>
+        <span class="dot" style="background:${HEALTH_COLOUR[r.health_band] || "#7A8899"}"></span>
+        <span class="band" style="color:${HEALTH_COLOUR[r.health_band] || "var(--muted)"}">${
+          r.health_band} ${r.health_score.toFixed(0)}</span>
+        <span class="why">${(r.health_reasons || []).join("; ") || "nothing to report"}</span>
+      </div>`).join("")
+    : `<div class="none">no robots</div>`);
+}
+
+// Phase 23b. What the security layer has actually caught. Numbers only --
+// the plain-English "who rejected what" already lives in the event feed
+// above, this just says how much of it there has been.
+function renderSecurity(){
+  const k = STATE.kpis || {};
+  const rejected = k.messages_rejected || 0;
+  document.getElementById("secNote").textContent =
+    rejected ? `— ${rejected} rejected` : "— nothing rejected yet";
+  setHTML("security", rejected
+    ? `Every message on the bus is checked for a valid signature before a
+       robot reads it. <b>${rejected}</b> so far did not have one, or reused
+       one already seen, and were thrown away untouched. Nothing legitimate
+       has ever been rejected -- only forged, replayed or stale messages are.`
+    : `Every message on the bus is checked for a valid signature before a
+       robot reads it. Nothing has been rejected -- press the button above to
+       try injecting one that was not signed with the fleet's key.`);
 }
 
 function renderRate(){
@@ -1668,6 +1888,10 @@ function renderRobots(){
       <div class="row1">
         <span class="rid" style="color:${col}">${r.robot_id}</span>
         <span class="badge ${r.status}">${r.status}</span>
+        ${r.health_band !== "HEALTHY" ? `<span class="badge" style="background:${
+          HEALTH_COLOUR[r.health_band]}22;color:${HEALTH_COLOUR[r.health_band]};border-color:${
+          HEALTH_COLOUR[r.health_band]}55" title="${(r.health_reasons||[]).join('; ')}">${
+          r.health_band}</span>` : ""}
         <span class="pick">${sel ? "controlling" : "select"}</span>
       </div>
       <div class="prio">priority <b>${(r.priority/10).toFixed(1)}</b>${
@@ -1708,6 +1932,7 @@ function watchDecisions(state){
     if (d.sim_time > lastDecisionTime){
       lastDecisionTime = d.sim_time;
       if (/^ORDER /.test(d.text)) logOrder(d.text);
+      else if (/^moved /.test(d.text)) logSlot(d.text);
       else if (/auction|collected|delivered|gave up|back up for auction/.test(d.text)) logTask(d.text);
       else if (/blocking|is clear again|expired/.test(d.text)) logFound(d.text);
       else if (/asked|boxed in|stepped aside|moving aside|back on the job/.test(d.text)) logJam(d.text);
@@ -1796,6 +2021,16 @@ function logPred(msg){
   el.classList.remove("empty"); el.innerHTML = events.join("");
 }
 
+function logSlot(msg){
+  if (!msg) return;
+  const d = new Date();
+  const t = [d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
+  events.unshift(`<div class="slot"><time>${t}</time><span>${msg}</span></div>`);
+  events.length = Math.min(events.length, 16);
+  const el = document.getElementById("log");
+  el.classList.remove("empty"); el.innerHTML = events.join("");
+}
+
 function log(msg, crash){
   if (!msg) return;
   const d = new Date();
@@ -1867,6 +2102,13 @@ document.addEventListener("click", async (e) => {
   const fleet = e.target.closest("[data-fleet]");
   if (fleet){
     const out = await post("/api/fleet", {action: fleet.dataset.fleet});
+    showHint(out.message); log(out.message);
+    return;
+  }
+
+  const human = e.target.closest("[data-human]");
+  if (human){
+    const out = await post("/api/human", {action: human.dataset.human});
     showHint(out.message); log(out.message);
   }
 });

@@ -6,6 +6,7 @@
 string robot_id             # who announced it (the order system, or a robot re-announcing)
 builtin_interfaces/Time stamp
 uint32 seq
+string tag                  # Phase 23: HMAC signature -- see security.py
 
 string task_id
 int32[2] pickup

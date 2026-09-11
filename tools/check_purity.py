@@ -24,6 +24,11 @@ BRAIN = os.path.join(ROOT, "shared", "fleetx_core")
 ALLOWED = {
     "dataclasses", "enum", "typing", "heapq", "math", "time",
     "collections", "itertools", "abc", "json", "random", "statistics",
+    # Phase 23: message signing (shared/fleetx_core/security.py). Both are
+    # pure-Python standard library, run identically on the laptop simulator
+    # and on the ROS 2 side, and touch neither a network nor a framework --
+    # exactly what "harmless" means in this list.
+    "hashlib", "hmac",
 }
 
 # Things that must never appear. Importing any of these means the brain has

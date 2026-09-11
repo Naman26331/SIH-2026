@@ -8,6 +8,7 @@
 string robot_id
 builtin_interfaces/Time stamp
 uint32 seq
+string tag                  # Phase 23: HMAC signature -- see security.py
 
 string action               # CLAIM or RELEASE
 string kind                 # NODE or EDGE

@@ -35,6 +35,7 @@ class MessageType(str, Enum):
     TASK_ANNOUNCE = "TASK_ANNOUNCE"
     TASK_BID = "TASK_BID"
     TASK_CLAIM = "TASK_CLAIM"
+    CENTRAL_COMMAND = "CENTRAL_COMMAND"
 
 
 @dataclass
@@ -361,18 +362,71 @@ class TaskBid:
 
 
 @dataclass
+class CentralCommand:
+    """Phase 18. "Do this job, and drive exactly this route" -- the ONE
+    message a centrally-planned robot ever acts on. Brain class only; there is
+    no peer-to-peer equivalent, because this is not something robots say to
+    each other. It is the one thing the boss says to a robot, and the one
+    thing that makes a centralised fleet stop working the moment it cannot be
+    delivered.
+
+    robot_id here means "who this is FOR", not "who sent it" -- the boss
+    sends every command, always. task_id empty means "just drive this route,
+    no job attached" (used for the empty-hands return-to-standby case, though
+    Phase 18 does not currently issue those).
+    """
+
+    robot_id: str                # who this command is FOR
+    timestamp: float
+    seq: int
+    task_id: str
+    pickup: Tuple[int, int]
+    dropoff: Tuple[int, int]
+    product: str
+    path: List[Tuple[int, int]]  # the exact route to drive, right now
+
+    # The boss, always -- robot_id above never means "who sent this", the
+    # same reasoning as TaskClaim.sender. Without this the bus routed on
+    # robot_id, excluded the one robot the command was addressed to from
+    # ever receiving it, and delivered it to everyone else instead.
+    sender: str = "BOSS"
+
+    type: str = field(default=MessageType.CENTRAL_COMMAND.value, init=False)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": self.type, "robot_id": self.robot_id,
+            "timestamp": round(self.timestamp, 3), "seq": self.seq,
+            "task_id": self.task_id, "pickup": self.pickup,
+            "dropoff": self.dropoff, "product": self.product,
+            "path": self.path, "sender": self.sender,
+        }
+
+
+@dataclass
 class TaskClaim:
     """"I am taking that job" -- or picked it up, delivered it, or gave it up.
 
     action is CLAIM, PICKED, DONE or RELEASE.
     """
 
-    robot_id: str
+    robot_id: str            # whose claim this is about
     timestamp: float
     seq: int
     task_id: str
     action: str
     cost: float = 0.0
+
+    # Phase 23. Almost always the same as robot_id -- a robot announcing its
+    # OWN claim. The one exception: a robot may release a job on behalf of a
+    # PEER it has noticed has gone quiet (03_ROBOT_AND_ROS2 section 5). There,
+    # robot_id names the quiet robot (so the release matches its held task),
+    # but `sender` names whoever is ACTUALLY speaking -- because a sequence
+    # number only means something within the counter that produced it, and
+    # that is always the sender's own, never the robot being spoken about.
+    # Empty means "same as robot_id", so every ordinary claim needs nothing
+    # extra here.
+    sender: str = ""
 
     type: str = field(default=MessageType.TASK_CLAIM.value, init=False)
 
@@ -381,6 +435,7 @@ class TaskClaim:
             "type": self.type, "robot_id": self.robot_id,
             "timestamp": round(self.timestamp, 3), "seq": self.seq,
             "task_id": self.task_id, "action": self.action,
+            "sender": self.sender,
             "cost": round(self.cost, 2),
         }
 
@@ -462,5 +517,14 @@ def from_dict(data: Dict[str, Any]):
         return TaskClaim(
             robot_id=data["robot_id"], timestamp=data["timestamp"], seq=data["seq"],
             task_id=data["task_id"], action=data["action"], cost=data.get("cost", 0.0),
+            sender=data.get("sender", ""),
+        )
+    if kind == MessageType.CENTRAL_COMMAND.value:
+        return CentralCommand(
+            robot_id=data["robot_id"], timestamp=data["timestamp"], seq=data["seq"],
+            task_id=data["task_id"], pickup=tuple(data["pickup"]),
+            dropoff=tuple(data["dropoff"]), product=data.get("product", ""),
+            path=[tuple(c) for c in data.get("path", [])],
+            sender=data.get("sender", "BOSS"),
         )
     raise ValueError(f"Unknown message type: {kind!r}")
