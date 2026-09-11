@@ -31,10 +31,10 @@ Phases come from `10_DEVELOPMENT_ROADMAP.md`.
 | 8 | Dynamic obstacles / blocked aisles | Done |
 | 9 | Task allocation (auction, reassignment) | Done |
 | 10 | Dashboard | Done |
-| 11 | Inventory intelligence | Not started |
-| 12 | Demand prediction | Not started |
-| 13 | Battery and charging | Not started |
-| 14 | Edge mode (network failure + recovery) | Not started |
+| 11 | Inventory intelligence | Done (inventory-lite) |
+| 12 | Demand prediction | Done |
+| 13 | Battery and charging | Done |
+| 14 | Edge mode (network failure + recovery) | Done |
 | 15 | Benchmarking (stop-and-wait vs FLEET-X) | Done |
 | 16 | Final demo | Not started |
 
@@ -72,6 +72,550 @@ never made-up ones.
 ## Log
 
 _(Newest entry first.)_
+
+### 2026-09-11 (later still) — Phase 12: guessing where the work will be
+
+- **What:** robots learn which aisles get busy and, when they have nothing to
+  do, go and wait there instead of standing where they happened to finish.
+
+  **The model counts. That is all it does.** `shared/fleetx_core/demand.py`
+  keeps, per aisle and per slot of the hour, how many orders have come from
+  there, with older ones fading. Predicting is reading the table. Two signals
+  added together: how busy the aisle has been lately at any hour, and how busy
+  it usually is at *this* slot of the hour. The first works from the very first
+  order; the second is worth nothing until the clock has been round once and
+  then starts catching patterns like "C goes mad every ten minutes".
+
+  I deliberately did not reach for anything cleverer. Every number in it can be
+  printed and every decision it leads to is one sentence — *"aisle B has had
+  78% of the last 59 orders (3.1x the average)"* — and a judge can check an
+  explanation but cannot check a weight.
+
+  **Nobody holds the model.** Each robot builds its own from the order
+  announcements every robot already hears, exactly like the job board. No
+  server, nothing to fail.
+
+  **Acting on it is designed to be harmless.** Only a robot with no job, no
+  charging trip and nowhere to be will move. It waits on ordinary floor, never
+  a picking face, a packing bay or a charger. A real job beats a hunch
+  instantly. If the model has no opinion, or the move would not gain at least 4
+  squares, nothing happens. If two robots are already closer, it leaves it to
+  them. **A wrong guess costs one short empty drive, and that is the whole
+  risk.**
+
+  **On the dashboard:** a "Where the work is" panel showing each aisle's share
+  as a bar, the sentence explaining the call, and a line per robot that moved —
+  *"R1 pre-positioned near B8, busy zone (aisle B has had 53% of the last 9
+  orders)"*. On the map, a robot waiting on a hunch gets a **dashed** purple
+  ring, not a solid marker: it is a guess, and it should not look like a job.
+
+- **The order stream had to change first, and this is the honest bit.** Orders
+  used to pick a shelf uniformly at random. Against that, the model correctly
+  reported "no idea" for ever and pre-positioning could never be anything but
+  noise — **there was genuinely nothing to learn.** Real warehouses are not
+  uniform: a few fast-moving lines take most of the picks and which lines drift
+  through the day. So most orders now come from whichever aisle is currently
+  hot, and the hot aisle changes every two minutes. It is seeded like
+  everything else, so both sides of the benchmark still get the identical
+  stream. I am flagging this because "I changed the test data and then my
+  predictor started working" is exactly the sort of thing that deserves to be
+  said out loud rather than buried.
+
+- **How good is it, really?** Measured, not asserted. Blind guessing is 25%.
+
+  | how fast the busy aisle moves | model names it right |
+  |---|---|
+  | every 60s | 65% |
+  | every 120s | 78% |
+  | every 300s | 95% |
+  | every 600s | 96% |
+
+  Memory half-life was chosen by measuring, not taste: 240s made it describe
+  where the work *used to be* (47%), and shorter was better at every pattern
+  speed, so it is 30s. At a very slow order rate it holds too few orders to be
+  sure and simply declines to answer 74% of the time — the safe direction.
+
+- **And does it actually help? A small amount, and only when it can.**
+  Re-measured after the herding fix below, on the corrected code:
+
+  | fleet | orders, off | orders, on | change |
+  |---|---|---|---|
+  | 3 | 86.0 | 86.0 | +0.0% |
+  | 5 | 96.3 | 97.7 | +1.4% |
+  | 10 | 98.3 | 98.0 | −0.3% |
+  | 20 | 97.7 | 96.7 | −1.0% |
+
+  At 10 and 20 robots the swing is inside noise, and the reason is not that the
+  idea is bad: those fleets already deliver ~98 of the 100 orders the benchmark
+  issues. There is no headroom to show a gain, or a loss. **Give the fleet more
+  work than it can do and the effect shows up properly:**
+
+  | fleet | rate | off | on | change |
+  |---|---|---|---|---|
+  | 5 | every 1.5s | 140.7 | 148.7 | **+5.7%** |
+  | 10 | every 1.0s | 186.7 | 190.0 | **+1.8%** |
+  | 20 | every 1.0s | 241.0 | 241.0 | +0.0% |
+
+  So: worth having when the fleet is the bottleneck, negligible or a wash when
+  it is not, and costs nothing when it is wrong. Collisions 0 in every one of
+  these runs, both settings, all fleet sizes.
+
+- **Four bugs, all mine, and one of them was the same mistake as Phase 14.**
+
+  1. **My anti-herding check read the radio.** I wrote "if two robots are
+     already closer, leave it to them" — using the fleet view, which is built
+     from messages. Cut the network and every robot believes it is alone, so
+     all of them answered "nobody is closer", **four robots drove to the
+     identical square and sat holding for each other for 91 seconds.** This is
+     precisely the error Phase 14 existed to fix, made again in new code.
+     Caught by the Phase 14 blackout test, not by anything I wrote.
+
+     Fixed three ways, each independently sufficient: out of touch means no
+     hunches at all (there is no new work arriving to get ahead of, and you
+     cannot know where the others are going); robots scatter by their own
+     **name**, which needs no messages and cannot go stale; and a hunch is
+     abandoned after 8 seconds of getting nowhere.
+
+  2. **Scattering by name still collided**, because each robot built its own
+     list of candidate squares filtered by what *it* knew was occupied — so
+     "slot 3" meant a different square to each robot. The candidate list is now
+     built from the map alone, identical for everybody, and occupancy is only
+     consulted at the end to decline. Declining is always safe; queueing is not.
+
+  3. **A waiting robot could sit on a picking face.** I excluded the target
+     aisle's faces but not the others', and the middle of aisle B is easily the
+     picking square for a rack in A or C.
+
+  4. **A robot that booked a charger kept its old staging marker**, so the
+     dashboard showed it "pre-positioned near B8" while it was really driving
+     to a charger on 10% battery. Fixed by dropping the hunch wherever the
+     robot stops being free.
+
+  The lesson from the first one is worth keeping: **anything that only works
+  when the radio works must be tested with the radio off.** I had that written
+  down from Phase 14 and still walked into it.
+
+- **Why:** an idle robot standing in the wrong half of the warehouse is the
+  cheapest waste there is. And it is a feature a judge can interrogate: every
+  move has a printed reason with the numbers behind it.
+
+- **Gate after the fix:** 332 tests pass (22 in `test_phase12.py`, three of
+  them written specifically to pin the herding bug down so it cannot come back
+  quietly). Purity guard clean. All 28 buttons at 20 robots under load, 0
+  failures. Full 3/5/10/15/20 table re-run on the corrected code — see below.
+  A live blackout on the running dashboard: 90 seconds with the network cut,
+  10 robots, orders every 2.5s — nobody pre-positioned, nobody stalled,
+  collisions 0.
+
+- **Milestone:** Phase 12 — Demand prediction.
+
+- **How to see it:** `python3 grid_sim/run.py 8000`, Start orders, and watch
+  "Where the work is". It says "learning" for the first few orders, then names
+  an aisle and explains why. Robots that move on it appear underneath with
+  their reason, and on the map as a dashed purple ring. `world.prepositioning
+  = False` turns the whole thing off and the fleet behaves exactly as it did
+  before this phase — there is a test that says so.
+
+
+### 2026-09-11 (later) — Phase 11: orders read like orders
+
+- **What:** shelves have names and stock, so an order says
+  **"Mouse x2 from shelf A14"** instead of "collect from (7, 5)".
+
+  - **`shared/fleetx_core/inventory.py`** — a new, deliberately thin layer. It
+    names every rack, says what is on it, and can turn a shelf name back into
+    the floor square a robot must stand on to reach it. It makes no decisions,
+    so it changes nothing about how robots drive or who gives way. It lives in
+    the shared brain because Part 2 needs the same names.
+  - **Names are warehouse signs.** A letter for each block of racks running top
+    to bottom, then a number counting along it: A1 to A36, then B, C, D. 120
+    racks get names. The other 24 are the middle of a four-wide block with
+    shelves on all four sides — no picker can reach them, so they are never
+    offered.
+  - **Orders pick a shelf, not a square.** The shelf knows its own face square,
+    so the robot drives to exactly where it always drove. Stock goes down as
+    orders are made and is restocked when a shelf empties, because an order for
+    an empty shelf would be a lie and a warehouse that empties itself makes a
+    worse demo than one that does not.
+  - **On the dashboard:** the order list reads "Mouse ×2 · A14" with the raw
+    squares still there on hover. The collect diamond on the map carries the
+    rack name. Each block of racks has its aisle letter above it, big and faint
+    — the sign you look up at. Hovering a rack tells you its name, what is on
+    it and how many; hovering the floor square in front of it tells you which
+    racks it serves. That last one is how you check for yourself that "shelf
+    A14" really is the square the robot drove to.
+
+- **One bug worth writing down, because it was an architecture mistake, not a
+  typo.** After wiring it all up, the dashboard read "Mouse x2 from shelf A14"
+  while the robot actually doing the job had no idea what shelf it was on.
+
+  Cause: every robot builds its **own** copy of the job board from radio
+  messages — that is the whole decentralised design — and I had added the shelf
+  name to the `Task` but not to the `TaskAnnounce` message that carries it.
+  So the world's board and the robot's board were two different versions of the
+  same order. Fixed by putting `shelf` and `quantity` on the message, and the
+  matching fields on Part 2's `Task.msg` and `translate.py` so the ROS 2 side
+  stays in step. **Anything not on the message does not exist as far as a robot
+  is concerned** — worth remembering for every future field.
+
+- **Why:** a judge should be able to read one line of the order list and point
+  at the exact rack on the map. Coordinates are for the robots.
+
+- **Milestone:** Phase 11 — Inventory intelligence (the "lite" half).
+
+- **How to see it:** `python3 grid_sim/run.py 8000`, press Start orders. The
+  Jobs panel now reads in words. Hover any rack on the map for its name and
+  stock; hover the square in front of it to see which racks it serves.
+
+- **Gate:** 310 tests pass (17 new in `test_phase11.py`). Purity guard clean.
+  All 28 dashboard buttons respond at 20 robots under full load, 0 failures.
+  Collisions 0. Full table below.
+
+
+### 2026-09-11 — Phase 13: robots run out of charge, and do something about it
+
+- **What:** robots now have a battery that matters, and manage it themselves.
+
+  **The decision is a question, not a threshold.** Not "am I under 20%" — a
+  fixed line is wrong in both directions, too twitchy for a short hop and too
+  brave for a long haul. Every robot asks: *if I drive this whole job and then
+  drive on to the nearest charging bay, do I still arrive with something in
+  hand?* Same question, asked in two places:
+    - **At the auction.** A robot that cannot finish a job and still reach a
+      charger does not bid for it. The job goes to somebody who can, rather
+      than being abandoned half-done.
+    - **While working.** If the sums stop adding up it hands the job back — but
+      only if it has not picked the parcel up yet. A robot already carrying
+      something delivers it if it possibly can; dropping a box in an aisle to
+      go and charge is worse than arriving low.
+
+  **Booking a bay uses the existing reservation table, unchanged.** A charging
+  bay is a square, and squares are already booked for a window of time by
+  whoever ranks highest. Nothing new was invented: the bay goes into the same
+  `_wanted_slots`, gets the same broadcast, obeys the same ownership rule.
+
+  **Lowest battery goes first**, and this is where the old lesson bit again.
+  The booking priority is the robot's own urgency — the emptier, the higher —
+  rounded into whole 5% bands, because every robot reads everyone else's charge
+  a fraction of a second late and a comparison that turns on a hair lets two
+  robots each decide they won. Ties break on robot ID, which cannot go stale.
+
+  **Charging:** 4% per second, up to 95%, then back to work. Draining is 0.35%
+  per second driving, 0.05% sitting.
+
+  **"Drain batteries" button** on the dashboard runs the whole fleet down to
+  8-22% so the demo happens now instead of in twenty minutes. Twenty robots
+  wanting four bays is also the interesting case. There is a battery panel
+  listing every robot, sorted emptiest first, with a bar that goes red under
+  15%, and it says who is charging and who is on their way.
+
+- **Four bugs found building this. Three were mine, one was old and serious.**
+
+  1. **All ten robots booked the same four bays.** Every robot decides in the
+     same tick, before anybody has heard anybody, so ten of them each booked
+     and all ten drove at four squares and wedged. Booking is only half of it:
+     a robot now keeps listening and **stands down** when it hears somebody
+     emptier wanted the bay. That is the whole point of sharing a table instead
+     of asking a server.
+
+  2. **The chargers were a 2x2 block in the corner** — the exact dead-end
+     pocket shape we removed from the delivery bays, and it failed the same
+     way. Drain ten batteries and all ten converge on one corner, wedge, and
+     sit there until they are flat. They are now spread along row 14 at
+     x = 3, 10, 17 and 24, each reachable from four sides.
+
+  3. **Charging lasted one tick.** Deciding runs after the battery pass, so it
+     saw "no destination", called the robot idle, and undid the charging status
+     every single tick. Ten robots sat on four chargers and drained to nothing
+     while apparently plugged in.
+
+  4. **A robot TELEPORTED 0.375 of a square** — and this one was an old trap,
+     not new code. `_advance` snapped any robot whose status was not a driving
+     one back onto its committed square. That is fine on a square and a
+     teleport in an aisle: it jumps backwards through every safety check, which
+     is how all three collisions in this project's history happened. Standing
+     down from a bay mid-aisle marked the robot idle on the spot and it snapped
+     back 0.375 squares. **Fixed at the root:** a part-finished step now holds
+     the position its wheels are actually at, whatever the status says. My own
+     new teleport test caught this; nothing else did, and the same trap could
+     have been reached from any future caller.
+
+  5. **The patrol loop hijacked a robot that was going to charge.** Free roam
+     hands a new waypoint to anything briefly without a destination, and it
+     sent a robot on 2.7% off across the warehouse instead of to the bay it had
+     just booked. Fixed in two places on purpose: the patrol loop leaves
+     charging robots alone, *and* the robot re-states its own destination if
+     anything overwrites it. Scaffolding should not be able to strand a robot.
+
+- **Why:** a warehouse robot that cannot manage its own charge is a demo, not a
+  system. And doing it decentrally is the point — no server decides who charges.
+
+- **Milestone:** Phase 13 — Battery and charging.
+
+- **How to see it:** `python3 grid_sim/run.py 8000`. Load 20 robots, Start
+  orders, then press **Drain batteries**. Watch the battery panel: never more
+  than four on bays at once, the emptiest going first, the rest carrying on
+  working and taking their turn. Fleet average climbs 16% to 57% in under two
+  minutes, and the collision counter stays on 0.
+
+- **Evidence:**
+
+  | check | result |
+  |---|---|
+  | 30 minutes, 20 robots, natural drain | **442 of 446 orders delivered, 72 charge cycles, 0 collisions, nobody ever flat** |
+  | Drain to 8-22% with 20 robots, live | never more than 4 on bays, avg 16% → 57% in 110s, 0 collisions |
+  | Tests | **293 pass** (16 new in `test_phase13.py`) |
+  | Purity guard | clean |
+  | All 28 dashboard buttons at 20 robots under load | 0 failures |
+
+- **The cost, stated plainly.** At 3 robots throughput falls 94.8 → 85.4 orders,
+  a 9.9% drop. That is not a bug: each robot spends about 35 seconds of a
+  400-second window on a charger, which is 8.8% of the fleet's available time,
+  and the drop matches. With 5 robots or more it costs nothing measurable —
+  98.0 and 98.6 orders, unchanged — because there is always somebody free to
+  cover for the one that is plugged in. Small fleets feel it; real ones do not.
+
+
+### 2026-09-10 (later) — Stop All really stops now, and the map stopped lying
+
+- **What:**
+
+  **1. Stop All did not stop anything.** The button said "Stopped. All robots
+  parked where they are" while half the fleet drove on. Measured: 10 robots,
+  press Stop All, and 4 of them travelled another 15.9 squares.
+
+  Cause: Stop All only cleared each robot's *destination*. That stops nothing.
+  A robot carrying a parcel hands itself the same destination straight back on
+  the very next tick — deliberately, because finishing what you are carrying is
+  meant to be hard to interrupt (that is the edge-mode design). So the button
+  stopped new orders being *created* and nothing else.
+
+  Fix: a real emergency stop, in the brain, because that is a real robot
+  feature — `Robot.halt()` / `resume()` and `World.halt_all()` / `resume_all()`.
+  A halted robot stops where it stands even mid-aisle, takes no new work, does
+  not re-target itself, and reports zero speed so nobody else dead-reckons it
+  creeping forward. Any other button releases it. A robot joining a stopped
+  fleet joins stopped. Clicking a square to send a robot releases that one
+  robot, and says so. There is a red STOPPED banner at the top of the sidebar.
+  **Measured after: 0 robots moved, 0.000 squares in 30 seconds.**
+
+  **2. The map had two kinds of pickup marker and one of them was fake.** The
+  four green "P" squares were never used by any order — I checked every
+  reference. Orders collect from the floor square beside a shelf, because that
+  is where goods are. A judge saw a green "Pick station" and then watched every
+  diamond appear somewhere else. The P squares are gone. Phase 1's one-robot
+  demo now names its start square directly instead of asking for the first P.
+
+  **3. Two orders in five said "fetch a box from the far wall."** The collect
+  points were "any floor square with a non-walkable neighbour" — and off the
+  edge of the map counts as non-walkable, so the whole outer border looked like
+  a shelf. 82 of 202 collect points had no rack anywhere near them. Now it asks
+  for an actual shelf: 136 points, and the 16 still on the border are the ones
+  genuinely up against a rack.
+
+  **4. Four delivery bays became ten.** All four used to sit on row 13, so every
+  delivery in the warehouse ended in the same band however far up it started.
+  Six more on the side walls (x=0 and x=27, beside each shelf band). They sit in
+  the outermost lane of a three-wide aisle, so a robot parked on one leaves two
+  lanes free — checked by parking a robot on all ten at once and confirming the
+  floor stays in one piece, which is the dead-end lesson kept as a test.
+  Deliveries now land in **all 10 bays, 43% in the bottom band instead of 100%**,
+  and the average drive to the nearest bay fell from 9.3 to 7.4 squares.
+
+  **5. The map key now explains the relationship instead of listing shapes.**
+  Coloured squares are the building and never move; shapes are the work, one
+  pair per live order, drawn in the colour of the robot that won the job. A star
+  always sits on a blue packing bay — there is a test that they can never
+  disagree, because if they can, the key is lying to a judge.
+
+- **Why:** a demo that shows a button doing nothing, or a label that promises
+  something that never happens, costs more than a missing feature.
+
+- **Milestone:** Phase 10 — Dashboard, and Phase 9 — job realism.
+
+- **How to see it:** `python3 grid_sim/run.py 8000`. Load 20 robots, start
+  orders, press **Stop all** — everything freezes instantly and a red STOPPED
+  banner appears. Press Start orders to release. Watch where the stars land:
+  all over the map now, not just along the bottom.
+
+- **THE HEADLINE NUMBER MOVED, AND NOT IN OUR FAVOUR. Read this bit.**
+
+  | fleet | collisions S&W | collisions FX | orders S&W | orders FX | % faster | was |
+  |---|---|---|---|---|---|---|
+  | 3 | 0 | **0** | 41.2 | 94.8 | 56.5% | *76.6%* |
+  | 5 | 0 | **0** | 30.2 | 98.0 | 69.2% | *81.9%* |
+  | 10 | 0 | **0** | 35.6 | 98.6 | 63.9% | *85.9%* |
+  | 15 | 0 | **0** | 25.4 | 98.6 | 74.2% | *86.8%* |
+  | 20 | 0 | **0** | 25.0 | 98.6 | 74.6% | *86.6%* |
+
+  We did not get worse. **FLEET-X went up** (95.8 to 98.6 orders at 20 robots)
+  and robots jammed at the end fell to 0.0 at every fleet size. What happened is
+  that spreading the delivery bays helped **stop-and-wait far more than it
+  helped us** — its throughput at 20 robots nearly doubled, 12.8 to 25.0 —
+  because queueing into one delivery band was most of what was killing it. We
+  fixed its biggest problem for it.
+
+  And FLEET-X cannot show the gain, because **it is against the ceiling**: the
+  benchmark issues 400s / one every 4s = 100 orders, and FLEET-X delivers 100 of
+  them. Measured directly:
+
+  | order rate | issued | FLEET-X delivered |
+  |---|---|---|
+  | every 4s (benchmark) | 100 | **100 — everything there was** |
+  | every 2s | 199 | 192 |
+  | every 1s | 396 | 290 |
+
+  So the benchmark is currently measuring how much the baseline improved, with
+  our side pinned at 100%. The honest read: **the win condition (20% faster,
+  zero collisions) is still met at every fleet size, worst case 56.5%**, and the
+  number would be higher at an order rate that does not cap us. I have NOT
+  changed the benchmark rate — moving the goalposts after seeing a result you
+  do not like is exactly the wrong move, and it is the user's call.
+
+- **The full gate:** 277 tests pass (9 added). Purity guard clean. All 27
+  dashboard buttons respond at 20 robots under full order load, 0 failures.
+  **Collisions 0 in every run on both sides.** Closest approach 1.000 squares;
+  biggest single-tick move 0.1250, exactly the wheel limit, so nothing
+  teleported.
+
+- **One test I had to change, and why it is not me weakening a test.**
+  `test_stop_parks_everyone` asserted that every robot's goal was `None` after
+  Stop All. That sounds right and guaranteed nothing — clearing the destination
+  is precisely the thing that did not work. It now asserts that nothing moved
+  and every robot is halted, which is strictly stronger and catches the bug the
+  old wording sailed past. A stopped robot now keeps its goal on purpose, so
+  you can see what it was in the middle of.
+
+
+### 2026-09-10 — Dashboard lag fixed, and two real bugs found while sweeping the buttons
+
+- **What:**
+  - **The lag.** Measured first, then fixed. At 20 robots the dashboard was
+    being sent **194,916 bytes twenty times a second — 3.8 MB every second**.
+    Nearly four fifths of that was `views`: a complete world-picture for every
+    single robot, when the screen only ever shows one at a time. Three changes:
+    - `world.snapshot(focus=...)` now sends the full picture for the one robot
+      you have selected and a stub for the other nineteen. Every robot still
+      sends the squares it has booked, because the map tints those.
+    - The dashboard tells the server which robot it is showing, through a new
+      `/api/focus`. Selecting a different robot switches which one gets detail.
+    - Each robot was carrying its whole list of predicted conflicts — 680 of
+      its 900 bytes — which the dashboard never read. It now sends the count.
+      Routes are capped at 12 squares ahead, the conflict list at 14 rows.
+
+    **Result: 3,807 KB/s → 524 KB/s at 20 robots. An 86% cut.** Building the
+    snapshot costs 1.1 ms, about 2% of one core at 20 frames a second.
+
+  - **The browser side.** The map still redraws 20 times a second so motion
+    stays smooth, but the twelve text panels down the side now refresh 5 times
+    a second — nobody reads faster than that — and a panel is only rewritten
+    when its text has actually changed. Anything that must catch every single
+    update (collisions, new conflicts, the event feed) still runs every frame.
+
+  - **Buttons that would not take a click.** Root cause: a click only counts if
+    the press and the release land on the *same* element. The sidebar was being
+    rebuilt twenty times a second, so a button could be destroyed in the
+    fraction of a second between pressing and letting go — and the browser then
+    fires no click at all. Nothing was wrong with the Fail button itself.
+    Fix: while a mouse button is held down anywhere on the page, panel rewrites
+    are queued instead of applied, and the queue is flushed shortly after the
+    release. No control can now be pulled out from under your finger.
+
+  - **The sidebar jumping.** Every list that can grow — robots, jobs, decisions,
+    reservations, conflicts, messages, the event feed — now has a fixed height
+    and scrolls inside itself. Adding robots or letting the job list build up no
+    longer makes the sidebar taller and pushes every button below it down the
+    page. The controls people actually press (Add robot, Remove robot, Start
+    orders, Stop all, the order-rate slider) are now in one block pinned to the
+    top that never changes size. Fail/Revive got their own fixed section instead
+    of sitting inside the Jobs panel, where the growing job list kept shoving
+    them around.
+
+- **Two real bugs the sweep turned up** (found by clicking all 27 controls with
+  20 robots on the floor and orders coming once a second):
+
+  1. **The scenario buttons stacked robots on top of each other, and it
+     registered as collisions.** Staging a demo starts by parking everything out
+     of the way, and that step cycled a hard-coded list of *five* corner squares
+     with a modulo. Fine for the three-robot demos it was written for. With
+     twenty robots it dropped four robots onto every square — twenty robots
+     became five stacks, and the collision counter went off, correctly. Pressing
+     Head-on at 20 robots took the count from 9 to 21.
+     **This was never a coordination failure and never affected the benchmark**,
+     which builds its fleets a different way. It was the demo setup putting
+     robots in the same place before the brain ever got a say. Fixed: every
+     robot now gets a parking square of its own, chosen as far as possible from
+     the corridor the demos run down, and never one the demo needs.
+
+  2. **Free roam only moved three robots.** The patrol routes were a hard-coded
+     table for R1, R2 and R3; every other robot found nothing and stood still.
+     With 20 robots on the floor, Free roam moved 3 of them. Fixed: R1, R2 and
+     R3 keep their hand-picked routes — them meeting at (13, 8) is the point of
+     the demo — and everyone else gets their own long route, picked the same way
+     every time so the demo is repeatable.
+
+- **Three things that looked like bugs and were not.** My first sweep script
+  sent `cut`, `silent` and `latency` where the endpoints expect `down`, `on` and
+  `latency_ms`, so Restore network reported "NETWORK DOWN", Unmute reported
+  "silenced", and the latency slider looked ignored. The browser sends the right
+  names. Worth writing down because for twenty minutes I believed I had found
+  three bugs in code that was correct — the test was wrong, not the dashboard.
+
+- **A jam that was honest behaviour.** After 700 random button presses the fleet
+  had 13 of 20 robots stuck. That turned out to be the leftovers of the soak
+  itself: it had silenced robots at random and never unmuted them. On a fresh
+  world the same fleet ran clean. Silencing 8 of 20 radios deliberately gives
+  2–4 robots briefly stuck at a time, recovering on their own, throughput barely
+  down, collisions 0 — which is the graceful degradation we designed for.
+
+- **Why:** the dashboard is the demo. If it stutters and eats clicks in front of
+  a judge, none of the coordination work behind it gets seen.
+
+- **Milestone:** Phase 10 — Dashboard (polish and hardening).
+
+- **How to see it:** `python3 grid_sim/run.py 8000`, open
+  `http://localhost:8000`, press **+ Add robot** until you have 20 and drag the
+  order-rate slider to the fastest setting. The map stays smooth, the sidebar
+  stops moving, and every button takes a click first time.
+
+- **The full gate, after every change above:**
+
+  | | result |
+  |---|---|
+  | Tests | 268 pass, 0 fail (266 before, 2 added) |
+  | Collision suite | 16 of 16 pass |
+  | Purity guard | clean — no web or ROS 2 code in the shared brain |
+  | 701 random button presses at 20 robots, full order load | 0 failures, slowest reply 18 ms, **0 collisions** |
+
+  | fleet | collisions S&W | collisions FLEET-X | orders S&W | orders FLEET-X | % faster |
+  |---|---|---|---|---|---|
+  | 3 | 0 | **0** | 22.4 | 95.6 | 76.6% |
+  | 5 | 0 | **0** | 17.6 | 97.2 | 81.9% |
+  | 10 | 0 | **0** | 13.8 | 97.8 | 85.9% |
+  | 15 | 0 | **0** | 12.8 | 96.8 | 86.8% |
+  | 20 | 0 | **0** | 12.8 | 95.8 | 86.6% |
+
+  Closest two robots ever came: 1.000 squares (touching is under 0.7).
+  Biggest single-tick move: 0.1250 squares — exactly what the wheels allow, so
+  nothing teleported. **This table is identical to the one from before these
+  changes, digit for digit**, which is the point: the dashboard got faster and
+  the brain was not touched.
+
+- **Gate detail:** 268 tests pass (2 new ones added below). 701 random button presses at 20
+  robots under full order load: 0 failures, slowest reply 18 ms, 0 collisions.
+  Full 3/5/10/15/20 table re-run — see the table entry below it.
+
+- **Two new tests, so neither bug can come back:**
+  - `test_staging_never_stacks_a_FULL_fleet_either` — stages every demo at 5,
+    10 and 20 robots and insists no two ever share a square. The three-robot
+    version of this test already existed and passed straight through the bug.
+  - `test_free_roam_actually_moves_the_whole_fleet` — 20 robots, Free roam, 20
+    seconds, and every single robot must have moved.
+
+  Both were checked against the old code first: the old staging put 20 robots
+  on 8 squares, and old Free roam left 15 of 20 standing still. A test that
+  cannot fail is not a test.
+
 
 ### 2026-09-07 (late) — Two diagrams added so the last pages argue a point
 
@@ -158,6 +702,91 @@ _(Newest entry first.)_
   folder. Open the `.pptx` if you want to edit anything.
 - **Still to fill in:** Slide 1 says `<Team ID from SIH portal>` — replace it
   with the real Team ID before uploading.
+
+### 2026-09-09 — Phase 14: it really does keep working without a network
+
+- **Anushka spotted the hole in the pitch.** "Kill the network" used to make the
+  warehouse stop, which made the line "the central server is not
+  safety-critical" false. Investigating it turned up something worse.
+
+- **THE BUG AT THE HEART OF IT.** I had been calling this a "local safety
+  reflex" for six phases:
+
+      for note in self.fleet.fresh(now):    # <- robots HEARD ON THE RADIO
+
+  It was not local at all. It was built from radio messages. Cut the radio and,
+  two seconds later, every robot believed it was alone in the warehouse. The
+  only reason 100% packet loss showed zero collisions was that nothing was
+  moving. **If they had been moving they would have driven straight through
+  each other.** A claim repeatedly made in this file was simply not true.
+
+- **The fix:** robots now SEE each other. A laser reflects off a robot exactly
+  as it does off a dropped pallet, so the world hands each robot the positions
+  of other robots within sensor range, as sensor readings rather than messages.
+  The safety check merges what was heard with what can be seen; with the radio
+  dead the second half alone keeps them apart. On real hardware this is the
+  LiDAR, which needs no network at all.
+
+- **THREE MORE BUGS the fix uncovered:**
+  1. **A sensor cannot tell parked from moving.** A shape is a shape, so every
+     robot yielded to IDLE robots for ever. Fixed by watching whether a shape
+     stays on the same square -- a moving robot crosses one in well under a
+     second, a parked one does not.
+  2. **Robots declared each other dead.** In the three seconds before safe mode
+     engaged, every robot saw every other as "gone quiet", released their jobs
+     and grabbed them. THREE ROBOTS ENDED UP CARRYING THE SAME PARCEL TO THE
+     SAME SQUARE and wedged each other there. The missing rule is a classic
+     one: **if you cannot reach anyone, the one that has gone quiet is you.**
+  3. **Rerouting was still radio-only.** A stuck robot replanned straight
+     through the robot blocking it, concluded the route was unchanged, and
+     waited 109 seconds. Rerouting, stepping aside and parking now all use
+     `known_occupied()`, which merges both sources.
+
+- **Safe mode** (03_ROBOT_AND_ROS2 §9, 01_PRODUCT §7): heard nothing for 3
+  seconds and we know we are not alone -> half speed, finish the job in hand,
+  take NO new work (no radio means no auction: nobody would hear the bid or the
+  claim), keep avoiding everyone on sensors. On reconnect: resync state, intent,
+  bookings and job claims, and the order system repeats unclaimed orders so a
+  blackout does not lose them for ever.
+
+- **LIVE TEST on the real server:**
+
+      --- normal ---        t= 40s  delivered=11  collisions=0  on sensors=0
+      >>> NETWORK CUT <<<
+                            t= 48s  delivered=13  collisions=0  on sensors=3  moving=3
+                            t= 64s  delivered=15  collisions=0  on sensors=3  moving=0
+      >>> RESTORED <<<
+                            t= 98s  delivered=15  collisions=0  on sensors=0  moving=3
+                            t=118s  delivered=18  collisions=0  on sensors=0  moving=3
+
+  Four orders delivered DURING the blackout. Robots never came closer than
+  1.00 squares. On restore the full protocol is back: auctions, giving way, the
+  lot.
+
+- **The line to use with judges, now true rather than aspirational:**
+  **"The warehouse degrades, it doesn't stop, and it never becomes unsafe."**
+  Do not claim throughput holds up -- it does not, and saying so invites a
+  question you would lose. No new orders can reach the robots, they run at half
+  speed, and coordination is cruder. That IS graceful degradation (01 §7).
+
+- **Full gate re-run, because the brain changed:**
+
+      fleet |  collisions   |  orders delivered  | % faster
+       size |  S&W  FLEET-X |   S&W     FLEET-X  |
+          3 |    0        0 |  22.4        95.0  |   76.4%
+          5 |    0        0 |  17.6        97.0  |   81.9%
+         10 |    0        0 |  13.8        97.6  |   85.9%
+         15 |    0        0 |  12.8        97.6  |   86.9%
+         20 |    0        0 |  12.8        94.2  |   86.4%
+
+  Identical to the pre-Phase-14 numbers within noise, so edge mode cost nothing.
+  266 of 266 tests pass (15 new). Collision suite clean. NEW test: 100% packet
+  loss from a cold start, not one message ever -- 0 collisions. Purity clean.
+
+- **Dashboard:** a "Cut the network" button, a flashing NETWORK DOWN banner, an
+  "On sensors" counter and a SAFE_MODE badge.
+
+---
 
 ### 2026-09-09 — Phase 10: the dashboard, and the side-by-side screen
 

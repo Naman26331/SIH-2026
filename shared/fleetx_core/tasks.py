@@ -58,6 +58,11 @@ class Task:
     pickup: Cell
     dropoff: Cell
     product: str = ""
+    # Phase 11. The shelf this came off, named the way the racks are signed
+    # ("A14"), and how many. The robot still drives to `pickup` -- these are
+    # what a person reads, not anything the robot steers by.
+    shelf: str = ""
+    quantity: int = 1
     priority: int = 5
     created_at: float = 0.0
     deadline: Optional[float] = None
@@ -106,12 +111,28 @@ class Task:
         self.bids.clear()
         self.reassignments += 1
 
+    def line(self) -> str:
+        """The order as a person would read it: "Mouse x2 from shelf A14".
+
+        Falls back to the product alone, and then to the raw square, so a task
+        made without inventory (every test written before Phase 11) still says
+        something sensible rather than an empty string.
+        """
+        if self.shelf and self.product:
+            return f"{self.product} x{self.quantity} from shelf {self.shelf}"
+        if self.product:
+            return f"{self.product} from ({self.pickup.x}, {self.pickup.y})"
+        return f"({self.pickup.x}, {self.pickup.y})"
+
     def to_dict(self) -> Dict[str, object]:
         return {
             "task_id": self.task_id,
             "pickup": [self.pickup.x, self.pickup.y],
             "dropoff": [self.dropoff.x, self.dropoff.y],
             "product": self.product,
+            "shelf": self.shelf,
+            "quantity": self.quantity,
+            "line": self.line(),
             "priority": self.priority,
             "flexible": self.flexible,
             "status": self.status.value,

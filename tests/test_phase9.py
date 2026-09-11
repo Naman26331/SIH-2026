@@ -204,22 +204,32 @@ class TestSelfHealing(unittest.TestCase):
                                 f"{r.robot_id} still thinks it is the dead robot's")
 
     def test_a_whole_batch_survives_a_robot_dying(self):
+        """Kill a robot that is holding a job; the batch must still finish.
+
+        This used to wait until t=8 to kill anybody, and stop the moment the
+        board was all done. Both conditions can be true at once: if the first
+        order happens to be a short one it is finished before t=8, the board is
+        briefly all-done, the loop stops, and the test passes having killed
+        nobody. Now it kills the first robot to pick anything up, and does not
+        stop until every order in the batch has been issued AND finished.
+        """
         w = phase2_world()
         sc = Scenarios(w)
         sc.apply("orders", seed=2, every=5.0, limit=6)
         killed = False
-        for _ in range(6000):
+        for _ in range(12000):
             sc.keep_busy()
             w.tick(0.05)
-            if not killed and w.sim_time > 8:
+            if not killed:
                 for r in w.robots.values():
                     if r.task is not None:
                         w.fail_robot(r.robot_id)
                         killed = True
                         break
-            if w.all_tasks_done():
+            if killed and sc.orders.emitted >= 6 and w.all_tasks_done():
                 break
-        self.assertTrue(killed)
+        self.assertTrue(killed, "never managed to kill a robot holding a job")
+        self.assertEqual(sc.orders.emitted, 6)
         self.assertTrue(w.all_tasks_done(), "jobs were lost when a robot died")
         self.assertEqual(w.collisions, 0)
 

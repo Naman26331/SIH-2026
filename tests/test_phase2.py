@@ -190,13 +190,27 @@ class TestScenarios(unittest.TestCase):
         self.assertGreater(w.collisions, 0)
 
     def test_stop_parks_everyone(self):
+        """Stop all must actually stop them.
+
+        This used to assert that every robot's goal was None, which sounds
+        right and guaranteed nothing: clearing the destination never stopped a
+        robot that was carrying something, because it hands itself the same
+        destination straight back. The button said "all robots parked" while
+        the fleet drove on. So ask the question that matters instead -- did
+        anything move? -- which the old wording could not catch.
+
+        A stopped robot now KEEPS its goal on purpose, so you can see what it
+        was in the middle of and so it can pick the job back up on release.
+        """
         w = phase2_world(); sc = Scenarios(w)
         sc.apply("patrol")
         run(w, 5, scenarios=sc)
         sc.apply("stop")
+        where = {rid: (r.x, r.y) for rid, r in w.robots.items()}
         run(w, 5, scenarios=sc)
-        for r in w.robots.values():
-            self.assertIsNone(r.goal)
+        for rid, r in w.robots.items():
+            self.assertTrue(r.halted, f"{rid} was not halted")
+            self.assertEqual((r.x, r.y), where[rid], f"{rid} moved after Stop all")
 
     def test_unknown_scenario_is_refused_politely(self):
         w = phase2_world(); sc = Scenarios(w)

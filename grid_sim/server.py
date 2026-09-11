@@ -33,6 +33,38 @@ from scenarios import Scenarios   # noqa: E402
 
 WEB_DIR = os.path.join(_HERE, "web")
 
+# A stamp for "which version of the code is this?".
+#
+# Worth the twenty lines. The dashboard keeps its connection open for hours, so
+# a tab opened before an edit carries on running the OLD JavaScript for ever --
+# a fixed button stays broken on screen while every test passes. And the server
+# itself loads the brain once at startup, so editing a .py file changes nothing
+# until it is restarted. Both are invisible without this.
+_STAMP_FILES = [
+    os.path.join(WEB_DIR, "index.html"),
+    os.path.join(WEB_DIR, "compare.html"),
+    os.path.join(_HERE, "server.py"),
+    os.path.join(_HERE, "scenarios.py"),
+    os.path.join(_SHARED, "fleetx_core", "robot.py"),
+    os.path.join(_SHARED, "fleetx_core", "world.py"),
+]
+
+
+def _build_stamp() -> str:
+    """Newest modification time across the files that matter, as HH:MM:SS."""
+    newest = 0.0
+    for path in _STAMP_FILES:
+        try:
+            newest = max(newest, os.path.getmtime(path))
+        except OSError:
+            pass
+    return time.strftime("%H:%M:%S", time.localtime(newest))
+
+
+# What the code on disk looked like when this server process started. If the
+# live stamp ever differs from this, the server itself is out of date.
+SERVER_BUILD = _build_stamp()
+
 TICK_HZ = 20.0            # how many times a second the world moves
 STREAM_HZ = 20.0          # how many times a second the browser is updated
 
@@ -99,6 +131,9 @@ class Simulation:
     def __init__(self, world: World):
         self.world = world
         self.scenarios = Scenarios(world)
+        # Which robot the dashboard is currently showing in detail. Only that
+        # one's full picture is put on the wire.
+        self.focus: Optional[str] = None
         self.lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -126,15 +161,23 @@ class Simulation:
 
     def snapshot(self) -> dict:
         with self.lock:
-            snap = self.world.snapshot()
+            snap = self.world.snapshot(focus=self.focus)
+            snap["build"] = _build_stamp()
+            snap["server_build"] = SERVER_BUILD
             snap["scenario"] = self.scenarios.name
+            snap["order_every"] = (self.scenarios.orders.every
+                                   if self.scenarios.orders else None)
             snap["auto"] = self.scenarios.auto
             snap["orders_running"] = self.scenarios.orders is not None
             return snap
 
     def map_data(self) -> dict:
         with self.lock:
-            return self.world.grid.to_dict()
+            data = self.world.grid.to_dict()
+            # Phase 11: the rack names travel with the map, which is sent once
+            # and never changes. They do not belong in the 20-a-second feed.
+            data["shelves"] = self.world.inventory.to_dict()["shelves"]
+            return data
 
     def set_goal(self, robot_id: str, x: int, y: int) -> dict:
         """Send a robot somewhere. Returns a short plain-English result."""
@@ -145,8 +188,18 @@ class Simulation:
             target = Cell(int(x), int(y))
             if not self.world.grid.is_walkable(target):
                 return {"ok": False, "message": "That square is a shelf, nothing can drive there."}
+            # Deliberately sending this robot somewhere releases its stop
+            # button. Anything else would look broken: you click a square, the
+            # robot lights up a route, and then just sits there.
+            was_halted = robot.halted
+            robot.resume()
+            # You have overridden it, so it is no longer going to charge. Hand
+            # the bay back rather than sitting on a booking it will not use.
+            if robot.charger is not None:
+                robot._leave_charger(self.world.bus, self.world.sim_time)
             robot.set_goal(target)
-            return {"ok": True, "message": f"{robot_id} is heading to ({x}, {y})."}
+            return {"ok": True, "message": f"{robot_id} is heading to ({x}, {y})."
+                    + (" (released from Stop all)" if was_halted else "")}
 
 
     def run_scenario(self, name: str, **kwargs) -> dict:
@@ -171,6 +224,49 @@ class Simulation:
             self.world.bus.silence(robot_id, on)
             word = "silenced" if on else "talking again"
             return {"ok": True, "message": f"{robot_id} is {word}."}
+
+    def drain_batteries(self) -> dict:
+        """Run the fleet flat so the charging demo happens now, not in 20
+        minutes. Twenty robots wanting four bays is the interesting case."""
+        with self.lock:
+            return self.world.drain_batteries()
+
+    def set_focus(self, robot_id) -> dict:
+        """The dashboard says which robot it is showing, so we can stop sending
+        the other nineteen robots' worth of detail that it throws away."""
+        with self.lock:
+            self.focus = robot_id if robot_id in self.world.robots else None
+            return {"ok": True, "message": f"Showing {self.focus or 'nobody'}."}
+
+    def order_rate(self, every: float) -> dict:
+        """How fast orders come in."""
+        with self.lock:
+            return {"ok": True, "message": self.scenarios.set_order_rate(every)}
+
+    def fleet_size(self, action: str, robot_id=None) -> dict:
+        """Add or remove a robot while the warehouse is running."""
+        with self.lock:
+            if action == "add":
+                return self.world.add_robot_live()
+            if action == "remove":
+                return self.world.remove_robot(robot_id)
+            return {"ok": False, "message": f"No such action: {action}"}
+
+    def cut_network(self, down: bool) -> dict:
+        """Pull the plug on the radio, or plug it back in.
+
+        Everything the robots need for SAFETY keeps working: their sensors see
+        each other whether the network is up or not. What stops is coordination
+        and new orders.
+        """
+        with self.lock:
+            bus = self.world.bus
+            if not hasattr(bus, "packet_loss"):
+                return {"ok": False, "message": "This bus cannot be cut."}
+            bus.packet_loss = 1.0 if down else 0.0
+            return {"ok": True, "message": (
+                "NETWORK DOWN. Robots finish what they are carrying, on sensors alone."
+                if down else "Network restored. Robots resync and orders resume.")}
 
     def set_network(self, loss: float, latency_ms: float) -> dict:
         """Make the radio link worse or better."""
@@ -230,7 +326,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path in ("/", "/index.html"):
-            self._send_file(os.path.join(WEB_DIR, "index.html"), "text/html; charset=utf-8")
+            self._send_file(os.path.join(WEB_DIR, "index.html"),
+                            "text/html; charset=utf-8", stamp=True)
         elif self.path in ("/compare", "/compare.html"):
             self._send_file(os.path.join(WEB_DIR, "compare.html"), "text/html; charset=utf-8")
         elif self.path == "/api/compare/stream":
@@ -249,7 +346,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path not in ("/api/goal", "/api/scenario", "/api/reset",
                              "/api/silence", "/api/network", "/api/obstacle",
-                             "/api/power", "/api/compare"):
+                             "/api/power", "/api/compare", "/api/cut",
+                             "/api/fleet", "/api/rate", "/api/focus",
+                             "/api/battery"):
             self._send_json({"error": "not found"}, status=404)
             return
         try:
@@ -277,6 +376,17 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/obstacle":
                 result = self.sim.obstacle(body.get("action", "toggle"),
                                            body.get("x", 0), body.get("y", 0))
+            elif self.path == "/api/battery":
+                result = self.sim.drain_batteries()
+            elif self.path == "/api/focus":
+                result = self.sim.set_focus(body.get("robot_id"))
+            elif self.path == "/api/rate":
+                result = self.sim.order_rate(body.get("every", 4.0))
+            elif self.path == "/api/fleet":
+                result = self.sim.fleet_size(body.get("action", "add"),
+                                             body.get("robot_id"))
+            elif self.path == "/api/cut":
+                result = self.sim.cut_network(bool(body.get("down", True)))
             elif self.path == "/api/network":
                 result = self.sim.set_network(body.get("loss", 0.0),
                                               body.get("latency_ms", 0.0))
@@ -298,10 +408,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_file(self, path: str, content_type: str):
+    def _send_file(self, path: str, content_type: str, stamp: bool = False):
         try:
             with open(path, "rb") as fh:
                 data = fh.read()
+            if stamp:
+                # Bake in the version this page was served at, so the page can
+                # notice for itself when it has gone stale.
+                data = data.replace(b"__PAGE_BUILD__", _build_stamp().encode())
         except OSError:
             self._send_json({"error": f"missing file {path}"}, status=500)
             return
@@ -367,11 +481,13 @@ def serve(world: Optional[World] = None, port: int = 8000, host: str = "127.0.0.
 
     banner = (
         "\n"
-        "  FLEET-X  ---  Part 1, Phase 10: dashboard + side-by-side comparison\n"
+        "  FLEET-X  ---  Part 1, Phase 14: keeps working when the network dies\n"
         "  " + "-" * 58 + "\n"
         f"  Open this in your browser:   {url}\n"
         f"  Side-by-side comparison:     {url}/compare\n"
         "  Click a robot card to select it, then click a floor square to send it.\n"
+        f"  Code version:                {SERVER_BUILD}\n"
+        "  (if the page shows a different version, reload the tab)\n"
         "  Press Ctrl+C here to stop.\n"
     )
     print(banner, flush=True)

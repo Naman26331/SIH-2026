@@ -170,6 +170,8 @@ def task_to_ros(m: TaskAnnounce) -> TaskMsg:
     out.pickup = [int(m.pickup[0]), int(m.pickup[1])]
     out.dropoff = [int(m.dropoff[0]), int(m.dropoff[1])]
     out.product = m.product
+    out.shelf = m.shelf
+    out.quantity = int(m.quantity)
     out.priority = int(m.priority)
     out.flexible = bool(m.flexible)
     return out
@@ -275,7 +277,8 @@ def ros_to_task(m: TaskMsg) -> TaskAnnounce:
         task_id=m.task_id,
         pickup=(int(m.pickup[0]), int(m.pickup[1])),
         dropoff=(int(m.dropoff[0]), int(m.dropoff[1])),
-        product=m.product, priority=m.priority, flexible=m.flexible)
+        product=m.product, shelf=m.shelf, quantity=int(m.quantity),
+        priority=m.priority, flexible=m.flexible)
 
 
 def ros_to_bid(m: TaskBidMsg) -> TaskBid:

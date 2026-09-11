@@ -7,6 +7,7 @@ the ROS 2 gateway will build the same object from live robot messages, so the
 dashboard code does not change at all.
 """
 
+import random
 import time
 from typing import Callable, Dict, List, Optional
 
@@ -18,6 +19,7 @@ from .messages import TaskAnnounce, TaskClaim
 from .tasks import Task, TaskBoard, TaskStatus
 from .reservations import Reservation
 from .grid import Cell, CellKind, Grid, default_grid
+from .inventory import Inventory
 from .robot import Robot, RobotStatus
 
 # Two robots closer together than this (in squares) are touching.
@@ -41,6 +43,14 @@ class World:
         # the robots do not notice the difference.
         self.bus: FleetBus = bus if bus is not None else InMemoryBus()
         self.robots: Dict[str, Robot] = {}
+        self.halted: bool = False        # emergency stop pulled on the fleet
+        # Phase 12. Off means idle robots wait where they finished, as before.
+        # Kept as a switch so the question "does guessing actually help?" can be
+        # answered by measuring both, rather than by assuming it does.
+        self.prepositioning: bool = True
+        # Phase 11: every rack has a name and something on it, so an order can
+        # say "Mouse x2 from shelf A14" instead of a pair of coordinates.
+        self.inventory: Inventory = Inventory(self.grid)
         # Turn booking off to get the old, blind behaviour back. Phase 15 uses
         # this to run the "before" side of the benchmark on the same code.
         self.reservations_enabled: bool = reservations_enabled
@@ -99,6 +109,13 @@ class World:
         self.obstacles: Dict[Cell, float] = {}
         self.obstacle_reports: int = 0
 
+        # --- Phase 14: the order system retries ---
+        # A job announced while the network was down reached nobody. Real order
+        # systems re-send; without this, every order issued during a blackout is
+        # simply lost for ever and the warehouse never recovers its backlog.
+        self.reannounce_every: float = 8.0
+        self._last_reannounce: float = 0.0
+
         # --- Phase 9: real jobs ---
         # The order book. Orders come from OUTSIDE the fleet -- somebody bought
         # something. Who does each job is settled by the robots between
@@ -156,6 +173,28 @@ class World:
         for robot in self.robots.values():
             robot.communicate(self.bus, self.sim_time)
 
+        # Phase 14: has the network gone? Each robot decides for itself, from
+        # whether anything at all has reached it lately.
+        for robot in self.robots.values():
+            note = robot.update_link_health(self.sim_time)
+            if note:
+                self.decisions.append({
+                    "sim_time": round(self.sim_time, 2),
+                    "robot_id": robot.robot_id, "text": note,
+                })
+                del self.decisions[:-20]
+
+        # Phase 13: charge. Before jobs on purpose -- a robot that is about to
+        # run out should hand its work back BEFORE the auction runs, not after.
+        for robot in self.robots.values():
+            note = robot.manage_battery(self.grid, self.bus, self.sim_time)
+            if note:
+                self.decisions.append({
+                    "sim_time": round(self.sim_time, 2),
+                    "robot_id": robot.robot_id, "text": note,
+                })
+                del self.decisions[:-20]
+
         # Phase 9: bid for jobs, claim what we win, get on with them.
         # Phase 9b: an idle robot must not sit on a pick or drop station.
         for robot in self.robots.values():
@@ -175,6 +214,20 @@ class World:
                 })
                 del self.decisions[:-20]
         self._sync_board()
+        self._reannounce_forgotten_tasks()
+
+        # Phase 12: anybody still with nothing to do goes and waits where the
+        # next order is likely to be. AFTER the auction on purpose -- a real job
+        # always beats a guess, and this only ever sees robots that got none.
+        for robot in (self.robots.values() if self.prepositioning else ()):
+            note = robot.consider_prepositioning(self.grid, self.sim_time,
+                                                 self.inventory)
+            if note:
+                self.decisions.append({
+                    "sim_time": round(self.sim_time, 2),
+                    "robot_id": robot.robot_id, "text": note,
+                })
+                del self.decisions[:-20]
 
         for robot in self.robots.values():
             robot.decide(self.grid, cost_fn, self.sim_time)
@@ -282,12 +335,14 @@ class World:
     # -------------------------------------------- real jobs (Phase 9)
 
     def announce_task(self, pickup: Cell, dropoff: Cell, product: str = "",
-                      priority: int = 5, flexible: bool = False) -> Task:
+                      priority: int = 5, flexible: bool = False,
+                      shelf: str = "", quantity: int = 1) -> Task:
         """Put a new job on the air. Nobody is told who should do it."""
         self._task_seq += 1
         task = Task(
             task_id=f"T-{self._task_seq:03d}",
             pickup=pickup, dropoff=dropoff, product=product, priority=priority,
+            shelf=shelf, quantity=quantity,
             created_at=self.sim_time, announced_at=self.sim_time,
             status=TaskStatus.ANNOUNCED, flexible=flexible,
         )
@@ -297,8 +352,42 @@ class World:
             task_id=task.task_id,
             pickup=(pickup.x, pickup.y), dropoff=(dropoff.x, dropoff.y),
             product=product, priority=priority, flexible=flexible,
+            shelf=shelf, quantity=quantity,
         ))
         return task
+
+    def _reannounce_forgotten_tasks(self) -> None:
+        """Say the unclaimed jobs again, now and then.
+
+        Nothing clever: the order system simply repeats itself. A job announced
+        into a dead network reached nobody, and the robots have no way of
+        knowing they missed it. Task ids never change, so a repeat that DID
+        arrive is harmless -- the board already has it.
+        """
+        if self.sim_time - self._last_reannounce < self.reannounce_every:
+            return
+        self._last_reannounce = self.sim_time
+
+        for task in self.board.tasks.values():
+            if task.finished or task.assigned_robot is not None:
+                continue
+            heard_by = sum(1 for r in self.robots.values()
+                           if r.board.get(task.task_id) is not None)
+            if heard_by == len(self.robots):
+                continue
+            self.bus.publish(TaskAnnounce(
+                robot_id="ORDERS", timestamp=self.sim_time, seq=0,
+                task_id=task.task_id,
+                pickup=(task.pickup.x, task.pickup.y),
+                dropoff=(task.dropoff.x, task.dropoff.y),
+                product=task.product, priority=task.priority,
+                flexible=task.flexible))
+
+    def _held_cells(self, rid: str, robot) -> List[List[int]]:
+        if robot.table is None:
+            return []
+        return [[c.x, c.y] for c in robot.table.held_nodes(
+            rid, self.sim_time, self.sim_time + 3.0)]
 
     def _sync_board(self) -> None:
         """Keep the dashboard's copy of the board in step with the robots'.
@@ -325,6 +414,120 @@ class World:
                     ours.reassignments = max(ours.reassignments, mine.reassignments)
                     if mine.bids:
                         ours.bids.update(mine.bids)
+
+    MAX_ROBOTS = 20
+
+    def demand_view(self) -> dict:
+        """What the fleet currently believes about where the work is.
+
+        Read off R1's model. Every robot builds its own from the same
+        announcements, so any of them would answer much the same -- and if they
+        ever disagreed wildly that would itself be worth seeing.
+        """
+        first = next(iter(self.robots.values()), None)
+        if first is None:
+            return {"orders_seen": 0, "ready": False, "busiest": None,
+                    "reason": "", "zones": [], "slot": 0}
+        return first.demand.to_dict(self.sim_time)
+
+    def drain_batteries(self, low: float = 8.0, high: float = 22.0) -> dict:
+        """Run every robot down flat, to force the charging demo.
+
+        Without this you wait about five minutes for batteries to fall on their
+        own. Twenty robots suddenly needing four bays is also the interesting
+        case: they have to take turns rather than all setting off at once.
+        """
+        rng = random.Random(len(self.robots))
+        for robot in self.robots.values():
+            robot.battery = rng.uniform(low, high)
+            robot._charge_checked_at = -99.0
+        return {"ok": True,
+                "message": f"Batteries drained to {low:.0f}-{high:.0f}% on "
+                           f"{len(self.robots)} robots. Watch them take turns."}
+
+    def halt_all(self) -> int:
+        """Pull the emergency stop on the whole fleet. Returns how many stopped."""
+        self.halted = True
+        for robot in self.robots.values():
+            robot.halt()
+        return len(self.robots)
+
+    def resume_all(self) -> int:
+        """Release the emergency stop on the whole fleet."""
+        self.halted = False
+        for robot in self.robots.values():
+            robot.resume()
+        return len(self.robots)
+
+    def add_robot_live(self) -> Dict[str, object]:
+        """Put another robot on the floor of a warehouse that is already running.
+
+        It joins with an empty head: no bookings, no job, nobody in its
+        notebook. Within a second it has heard the others and they have heard
+        it. Nothing special is needed, because that is how a robot joins on
+        DDS too -- discovery is automatic.
+        """
+        if len(self.robots) >= self.MAX_ROBOTS:
+            return {"ok": False,
+                    "message": f"{self.MAX_ROBOTS} robots is the most this warehouse holds."}
+
+        # Keep clear of where robots actually ARE, not just which square they
+        # are registered on: one that is part way along a segment has its body
+        # between two squares, and dropping a new robot beside it would put two
+        # bodies in the same space before either had moved.
+        def clear(cell: Cell) -> bool:
+            if not self.grid.is_walkable(cell):
+                return False
+            for r in self.robots.values():
+                if (r.x - cell.x) ** 2 + (r.y - cell.y) ** 2 < 1.6 ** 2:
+                    return False
+            return True
+
+        spot = next((c for c in FLEET_START_CELLS if clear(c)), None)
+        if spot is None:
+            spot = next((c for c in self.grid.cells_of_kind(CellKind.FLOOR)
+                         if clear(c)), None)
+        if spot is None:
+            return {"ok": False, "message": "Nowhere free to put another robot."}
+
+        used = {r.robot_id for r in self.robots.values()}
+        n = 1
+        while f"R{n}" in used:
+            n += 1
+        robot = self.add_robot(Robot(robot_id=f"R{n}", cell=spot))
+        if getattr(self, "halted", False):
+            robot.halt()
+        return {"ok": True,
+                "message": f"{robot.robot_id} joined at ({spot.x}, {spot.y}). "
+                           f"{len(self.robots)} robots now."}
+
+    def remove_robot(self, robot_id: Optional[str] = None) -> Dict[str, object]:
+        """Take a robot off the floor.
+
+        Its bookings go back and its job goes back up for auction -- exactly
+        what happens when one fails, because from the fleet's point of view a
+        robot that has been removed and one that has died look the same.
+        """
+        if len(self.robots) <= 1:
+            return {"ok": False, "message": "One robot has to stay."}
+        if robot_id is None:
+            robot_id = sorted(self.robots, key=lambda r: int(r[1:]))[-1]
+        robot = self.robots.get(robot_id)
+        if robot is None:
+            return {"ok": False, "message": f"There is no robot called {robot_id}."}
+
+        robot.release_all(self.bus, self.sim_time)
+        held = self.board.release_all(robot_id)
+        for task in held:
+            self.bus.publish(TaskClaim(
+                robot_id=robot_id, timestamp=self.sim_time, seq=0,
+                task_id=task.task_id, action="RELEASE"))
+        del self.robots[robot_id]
+        self._deadlocked.discard(robot_id)
+        names = ", ".join(t.task_id for t in held) or "no jobs"
+        return {"ok": True,
+                "message": f"{robot_id} left. Released: {names}. "
+                           f"{len(self.robots)} robots now."}
 
     def fail_robot(self, robot_id: str) -> Dict[str, object]:
         """Switch a robot off mid-job. 08_SIMULATION Scenario 6."""
@@ -397,6 +600,17 @@ class World:
             seen_clear = [c for c in robot.blocked_cells(self.sim_time)
                           if c not in self.obstacles
                           and within_range(robot.x, robot.y, c, SENSOR_RANGE)]
+
+            # Robots reflect a laser beam exactly like a dropped pallet does.
+            # This is what makes the safety reflex work with the radio dead --
+            # it needs no messages, only line of sight.
+            robot.sense_robots(
+                [(other.x, other.y, other.cell)
+                 for other in self.robots.values()
+                 if other.robot_id != robot.robot_id
+                 and other.status is not RobotStatus.FAILED
+                 and within_range(robot.x, robot.y, other.cell, SENSOR_RANGE + 1.0)],
+                self.sim_time)
 
             for note in robot.sense(seen_blocked, seen_clear, self.sim_time):
                 self.obstacle_reports += 1
@@ -599,6 +813,7 @@ class World:
         self.decisions.clear()
         self.deadlocks_broken = 0
         self.obstacle_reports = 0
+        self._last_reannounce = 0.0
         self.board = TaskBoard()
         self._task_seq = 0
         self.sim_time = 0.0
@@ -667,6 +882,7 @@ class World:
             "reroutes": self.reroutes,
             "deadlocks_broken": self.deadlocks_broken,
             "obstacles": len(self.obstacles),
+            "safe_mode": sum(1 for r in robots if r.safe_mode),
             **{f"task_{k}": v for k, v in self.board.stats(self.sim_time).items()},
             "blocked_known": len(set().union(*[r.blocked_cells(self.sim_time)
                                                for r in robots]) if robots else set()),
@@ -679,20 +895,35 @@ class World:
 
     # ---------------------------------------------------------------- output
 
-    def snapshot(self) -> Dict[str, object]:
+    def snapshot(self, focus: Optional[str] = None) -> Dict[str, object]:
         """Everything the dashboard needs, as plain data."""
         return {
             "sim_time": round(self.sim_time, 2),
             "ticks": self.ticks,
-            "robots": [r.to_dict(self.sim_time) for r in self.robots.values()],
+            # The map draws each robot's planned route as a short dotted line;
+            # past a dozen squares it is off the edge of anything anyone looks
+            # at, so there is no point sending the rest twenty times a second.
+            "robots": [dict(r.to_dict(self.sim_time),
+                            path=[[c.x, c.y] for c in r.path[:12]])
+                       for r in self.robots.values()],
             "collision_events": self.collision_events[-12:],
-            "conflicts": self.active_conflicts(),
+            "conflicts": self.active_conflicts()[:14],
+            # Only ONE robot's full picture is ever shown on screen, so only
+            # one is sent. Sending all of them made this 78% of a 65 KB
+            # payload, twenty times a second -- over a megabyte a second of
+            # detail that was thrown away on arrival, and the reason the page
+            # crawled with a big fleet.
+            #
+            # Every robot still contributes `holds`, because the map tints the
+            # squares each one has booked -- but that is a handful of numbers.
             "views": {
-                rid: dict(r.fleet.to_dict(self.sim_time),
-                          table=r.table.rows(self.sim_time) if r.table else [],
-                          holds=[[c.x, c.y] for c in r.table.held_nodes(
-                              rid, self.sim_time, self.sim_time + 3.0)] if r.table else [],
-                          blocked=r.blocked_map.to_rows(self.sim_time) if r.blocked_map else [])
+                rid: (dict(r.fleet.to_dict(self.sim_time),
+                           table=r.table.rows(self.sim_time) if r.table else [],
+                           holds=self._held_cells(rid, r),
+                           blocked=r.blocked_map.to_rows(self.sim_time) if r.blocked_map else [])
+                      if (focus is None or rid == focus)
+                      else {"owner": rid, "neighbours": [], "table": [],
+                            "blocked": [], "holds": self._held_cells(rid, r)})
                 for rid, r in self.robots.items() if r.fleet
             },
             "stuck": self.stuck_robots(),
@@ -702,6 +933,7 @@ class World:
                            if self.robots else []),
             "decisions": self.decisions[-8:][::-1],
             "bus": self.bus.stats() if hasattr(self.bus, "stats") else {},
+            "demand": self.demand_view(),
             "messages": [
                 m.to_dict() for m in list(getattr(self.bus, "recent", []))[-14:]
             ][::-1],
@@ -718,7 +950,9 @@ def phase1_world() -> World:
     Roadmap Phase 1 asks for exactly one thing: R1 can move from A to B.
     """
     world = World()
-    start = world.grid.cells_of_kind(CellKind.PICK)[0]
+    # Was the first PICK square, back when the map had some. It starts in the
+    # bottom-left corner, which is what the Phase 1 demo has always shown.
+    start = Cell(0, 13)
     world.add_robot(Robot(robot_id="R1", cell=start))
     return world
 

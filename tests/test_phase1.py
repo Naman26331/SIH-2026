@@ -36,8 +36,19 @@ class TestGrid(unittest.TestCase):
             self.assertEqual(abs(n.x - 5) + abs(n.y - 4), 1)
 
     def test_stations_exist(self):
-        for kind in (CellKind.PICK, CellKind.DROP, CellKind.CHARGER):
+        # No PICK squares any more, on purpose: nothing ever used them, and a
+        # green "pick station" that no order ever visits only confuses people.
+        # Orders are collected from the floor square beside a shelf.
+        for kind in (CellKind.DROP, CellKind.CHARGER):
             self.assertTrue(self.g.cells_of_kind(kind), f"no {kind} on the map")
+        self.assertEqual(self.g.cells_of_kind(CellKind.PICK), [])
+
+    def test_delivery_bays_are_spread_out(self):
+        """All ten, and never all in one band -- that was the old hotspot."""
+        bays = self.g.cells_of_kind(CellKind.DROP)
+        self.assertEqual(len(bays), 10)
+        self.assertGreaterEqual(len({b.y for b in bays}), 4,
+                                "delivery bays are bunched at too few heights")
 
     def test_ragged_map_is_rejected(self):
         with self.assertRaises(ValueError):

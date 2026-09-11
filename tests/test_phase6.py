@@ -141,7 +141,12 @@ class TestGoingAround(unittest.TestCase):
         sc.apply("head_on")
         run(w, 20, sc=sc)
         self.assertTrue(w.decisions)
-        self.assertIn("gave way", w.decisions[0]["text"])
+        # Somewhere in the log, not necessarily first. Since head-on standoffs
+        # are now spotted in about a second, the loop-detection line usually
+        # lands ahead of the going-around line, and asserting on decisions[0]
+        # was testing the order of the log rather than the behaviour.
+        text = " | ".join(d["text"] for d in w.decisions)
+        self.assertIn("gave way", text, f"nobody gave way. Log was: {text}")
 
     def test_a_reroute_actually_changes_the_route(self):
         w = world_with()

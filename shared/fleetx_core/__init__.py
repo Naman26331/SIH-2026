@@ -19,6 +19,7 @@ from .messages import (BlockedAisle, ConflictAlert, Heartbeat, IntentUpdate,
                        MessageType, PathReservation, PoseUpdate, TaskAnnounce,
                        TaskBid, TaskClaim, WaitReport, YieldRequest, from_dict)
 from .grid import Cell, CellKind, Grid, default_grid
+from .inventory import CATALOGUE, Inventory, Shelf
 from .obstacles import (DEFAULT_TTL, SENSOR_RANGE, Block, BlockedMap,
                         within_range)
 from .priority import (BASE_PRIORITY, DOMINANCE_MARGIN, as_points,
@@ -33,6 +34,7 @@ from .world import (COLLISION_DISTANCE, World, fleet_world, phase1_world,
                     phase2_world)
 
 __all__ = [
+    "Inventory", "Shelf", "CATALOGUE",
     "Cell", "CellKind", "Grid", "default_grid",
     "find_path", "manhattan", "uniform_cost",
     "Robot", "RobotStatus",

@@ -47,28 +47,50 @@ _BLOCKED = {CellKind.SHELF}
 # Twelve shelf blocks, vertical aisles between them, three horizontal
 # cross-aisles so a robot always has more than one way around.
 #
-# The two packing stations (DD) sit in the open band at the bottom, well apart.
-# They used to be four bays in a row ON the bottom wall, which made a dead-end
-# pocket with a single mouth: at 15+ robots they queued into it and wedged each
-# other out, and throughput fell as robots were added. Same four bays here, but
-# each one is reachable from four sides and rows 14-15 stay clear underneath as
-# a bypass, so a robot standing on a bay blocks nothing.
+# Ten packing bays (D), deliberately spread out.
+#
+# Two lessons are baked into where they are.
+#
+# First: they used to be four bays in a row ON the bottom wall, which made a
+# dead-end pocket with a single mouth. At 15+ robots they queued into it and
+# wedged each other out, and throughput FELL as robots were added. The four at
+# the bottom are now each reachable from four sides, with rows 14-15 clear
+# underneath as a bypass, so a robot standing on a bay blocks nothing.
+#
+# Second: having all four at the bottom meant every delivery in the warehouse
+# ended in the same band, however far up it started. The six on the side walls
+# (x=0 and x=27, beside each shelf band) spread the work over the full height:
+# average drive to the nearest bay falls from 9.3 squares to 7.4. They sit in
+# the OUTERMOST lane of a three-wide aisle, so a robot parked on one still
+# leaves two lanes free and the floor stays fully connected.
+#
+# The four chargers (C) are spread along row 14, not bunched in the corner.
+# They used to be a 2x2 block at the bottom right -- the same dead-end pocket
+# shape that the delivery bays had, and it failed the same way: drain ten
+# batteries at once and all ten converge on one corner, wedge, and sit there
+# until they are flat. Spread out, each is reachable from four sides with row
+# 13 above and row 15 below as bypasses.
+#
+# There are no P squares. There used to be four, labelled "pick station", and
+# nothing ever used them: orders are collected from the floor square next to a
+# shelf, because that is where the goods physically are. A green square on the
+# map promising something that never happened just made the demo confusing.
 DEFAULT_WAREHOUSE: Tuple[str, ...] = (
     "............................",
     "...####..####..####..####...",
-    "...####..####..####..####...",
-    "...####..####..####..####...",
-    "............................",
-    "...####..####..####..####...",
-    "...####..####..####..####...",
+    "D..####..####..####..####..D",
     "...####..####..####..####...",
     "............................",
     "...####..####..####..####...",
-    "...####..####..####..####...",
+    "D..####..####..####..####..D",
     "...####..####..####..####...",
     "............................",
-    "PP...DD.............DD..CC..",
-    "PP......................CC..",
+    "...####..####..####..####...",
+    "D..####..####..####..####..D",
+    "...####..####..####..####...",
+    "............................",
+    ".....DD.............DD......",
+    "...C......C......C......C...",
     "............................",
 )
 

@@ -178,6 +178,161 @@ class TestNoTeleporting(unittest.TestCase):
             self.assertEqual(len(set(cells)), len(cells),
                              f"{name} put two robots on one square")
 
+    def test_staging_never_stacks_a_FULL_fleet_either(self):
+        """The three-robot version of this test passed all the way through a
+        real bug. Staging parked every robot on a hard-coded list of five
+        corner squares, cycling with a modulo, so with twenty robots on the
+        floor four landed on every square and the collision counter went off.
+        Three robots never noticed. Twenty do."""
+        for size in (5, 10, 20):
+            w = fleet_world(size)
+            sc = Scenarios(w)
+            for name in ("head_on", "intersection", "patrol", "head_on"):
+                sc.apply(name)
+                cells = [r.cell for r in w.robots.values()]
+                self.assertEqual(
+                    len(set(cells)), len(cells),
+                    f"{name} with {size} robots put two of them on one square")
+
+    def test_free_roam_actually_moves_the_whole_fleet(self):
+        """Free roam used to read a hard-coded route table with entries for R1,
+        R2 and R3 only. Every other robot found nothing and stood still, so
+        Free roam with twenty robots moved three of them."""
+        w = fleet_world(20)
+        sc = Scenarios(w)
+        sc.apply("patrol")
+        start = {rid: (r.x, r.y) for rid, r in w.robots.items()}
+        for _ in range(400):                       # 20 seconds
+            sc.keep_busy()
+            w.tick(0.05)
+        stayed = [rid for rid, r in w.robots.items()
+                  if (r.x, r.y) == start[rid]]
+        self.assertEqual(stayed, [], f"these robots never moved: {stayed}")
+
+
+class TestStopAllReallyStops(unittest.TestCase):
+    """Stop all used to clear each robot's DESTINATION, which stopped almost
+    nothing: a robot carrying a parcel hands itself the same destination back
+    on the very next tick, deliberately, because finishing what you are
+    carrying is meant to be hard to interrupt. The button said "all robots
+    parked" while half the fleet drove on."""
+
+    def _busy_world(self, n=10):
+        w = fleet_world(n)
+        sc = Scenarios(w)
+        sc.apply("orders", every=4.0)
+        for _ in range(1200):              # 60s, so parcels are in transit
+            sc.keep_busy()
+            w.tick(0.05)
+        return w, sc
+
+    def test_nothing_moves_at_all_after_stop_all(self):
+        w, sc = self._busy_world()
+        self.assertTrue(any(r.task for r in w.robots.values()),
+                        "test is pointless unless somebody is carrying something")
+        sc.apply("stop")
+        where = {rid: (r.x, r.y) for rid, r in w.robots.items()}
+        for _ in range(600):               # 30 seconds stopped
+            sc.keep_busy()
+            w.tick(0.05)
+        moved = {rid: (r.x, r.y) for rid, r in w.robots.items()
+                 if (r.x, r.y) != where[rid]}
+        self.assertEqual(moved, {}, f"these robots moved after Stop all: {moved}")
+        self.assertEqual(w.collisions, 0)
+
+    def test_a_stopped_robot_takes_no_new_work(self):
+        w, sc = self._busy_world()
+        sc.apply("stop")
+        held = {rid: (r.task.task_id if r.task else None)
+                for rid, r in w.robots.items()}
+        for _ in range(600):
+            sc.keep_busy()
+            w.tick(0.05)
+        after = {rid: (r.task.task_id if r.task else None)
+                 for rid, r in w.robots.items()}
+        self.assertEqual(held, after, "a halted robot picked up different work")
+
+    def test_the_other_buttons_release_the_stop(self):
+        for name in ("orders", "patrol", "head_on", "intersection"):
+            w, sc = self._busy_world(5)
+            sc.apply("stop")
+            self.assertTrue(all(r.halted for r in w.robots.values()))
+            sc.apply(name)
+            self.assertTrue(all(not r.halted for r in w.robots.values()),
+                            f"pressing {name} left robots stuck on the stop button")
+
+    def test_a_robot_joining_a_stopped_fleet_joins_stopped(self):
+        w, sc = self._busy_world(5)
+        sc.apply("stop")
+        w.add_robot_live()
+        self.assertTrue(all(r.halted for r in w.robots.values()),
+                        "the new robot drove around a parked warehouse")
+
+    def test_stopping_never_causes_a_collision(self):
+        """Halting mid-aisle leaves robots part way between two squares. Make
+        sure nobody drives into one that stopped in front of them."""
+        w = fleet_world(15)
+        sc = Scenarios(w)
+        sc.apply("orders", every=3.0)
+        for cycle in range(6):
+            for _ in range(300):
+                sc.keep_busy()
+                w.tick(0.05)
+            sc.apply("stop")
+            for _ in range(100):
+                sc.keep_busy()
+                w.tick(0.05)
+            sc.apply("orders", every=3.0)
+        self.assertEqual(w.collisions, 0)
+
+
+class TestTheMapSaysWhatItMeans(unittest.TestCase):
+    def test_orders_only_collect_from_beside_a_real_shelf(self):
+        """The check used to be "is any neighbour not walkable?", and off the
+        edge of the map counts as not walkable -- so the whole outer wall
+        looked like a shelf and two orders in five said "fetch a box from the
+        far wall"."""
+        from scenarios import OrderGenerator
+        w = fleet_world(3)
+        gen = OrderGenerator(w)
+        g = w.grid
+        for c in gen.pickups:
+            touching = [n for n in (Cell(c.x + 1, c.y), Cell(c.x - 1, c.y),
+                                    Cell(c.x, c.y + 1), Cell(c.x, c.y - 1))
+                        if g.in_bounds(n) and g.kind(n) is CellKind.SHELF]
+            self.assertTrue(touching, f"({c.x},{c.y}) has no shelf next to it")
+
+    def test_every_delivery_lands_on_a_packing_bay(self):
+        """The star must always sit on a blue square. If they can disagree, the
+        map key is lying to the judge."""
+        from scenarios import OrderGenerator
+        w = fleet_world(3)
+        gen = OrderGenerator(w)
+        bays = set(w.grid.cells_of_kind(CellKind.DROP))
+        self.assertEqual(len(bays), 10)
+        for c in gen.dropoffs:
+            self.assertIn(c, bays)
+
+    def test_a_robot_on_any_bay_still_blocks_nobody(self):
+        """Park a robot on all ten bays at once; the floor must stay in one
+        piece. This is the dead-end pocket lesson, kept as a test."""
+        from collections import deque
+        g = fleet_world(3).grid
+        walk = {Cell(x, y) for y in range(g.height) for x in range(g.width)
+                if g.is_walkable(Cell(x, y))}
+        free = walk - set(g.cells_of_kind(CellKind.DROP))
+        start = next(iter(free))
+        seen, q = {start}, deque([start])
+        while q:
+            c = q.popleft()
+            for n in (Cell(c.x + 1, c.y), Cell(c.x - 1, c.y),
+                      Cell(c.x, c.y + 1), Cell(c.x, c.y - 1)):
+                if n in free and n not in seen:
+                    seen.add(n)
+                    q.append(n)
+        self.assertEqual(len(seen), len(free),
+                         "a robot parked on a bay cut the floor in two")
+
 
 class TestAStoppedRobotSaysSo(unittest.TestCase):
     def test_a_held_robot_reports_zero_speed(self):

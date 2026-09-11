@@ -11,5 +11,7 @@ string task_id
 int32[2] pickup
 int32[2] dropoff
 string product
+string shelf                # Phase 11: the rack it comes off, e.g. "A14"
+int32 quantity              # how many
 int32 priority
 bool flexible               # true = any packing station will do

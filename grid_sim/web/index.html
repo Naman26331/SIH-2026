@@ -74,8 +74,34 @@
 
   /* ---------- side panel ---------- */
   aside{
-    width:300px; flex:none; background:var(--panel); border-left:1px solid var(--border);
+    width:310px; flex:none; background:var(--panel); border-left:1px solid var(--border);
     display:flex; flex-direction:column; overflow-y:auto;
+  }
+
+  /* Every list that can grow gets a ceiling and scrolls inside itself.
+     Without this, adding robots or letting the job list build up made the
+     whole sidebar taller, which pushed every button below it down the page --
+     so a button could slide out from under the cursor between pressing and
+     releasing, and the click went nowhere. Fixed heights mean fixed buttons. */
+  #robots{max-height:224px; overflow-y:auto}
+  #tasks{max-height:150px; overflow-y:auto}
+  #decisions{max-height:112px; overflow-y:auto}
+  #waitg{max-height:80px; overflow-y:auto}
+  #rtable{max-height:150px; overflow-y:auto}
+  #conflicts{max-height:132px; overflow-y:auto}
+  #blocks{max-height:88px; overflow-y:auto}
+  #msgs{max-height:150px; overflow-y:auto}
+  #log{max-height:190px; overflow-y:auto}
+
+  /* The controls people actually press sit in one block that never changes
+     size, pinned to the top, so they are always in the same place. */
+  .halted{
+    background:rgba(248,113,113,.13); border:1px solid var(--red); color:var(--red);
+    border-radius:5px; padding:5px 7px; margin-bottom:7px; font-size:11px; line-height:1.35;
+  }
+  .controls-fixed{
+    position:sticky; top:0; z-index:4; background:var(--panel);
+    border-bottom:1px solid var(--border);
   }
   .sec{padding:14px 16px; border-bottom:1px solid var(--border)}
   .sec h2{
@@ -145,11 +171,41 @@
   .tasks .ASSIGNED .st{color:var(--amber)}
   .tasks .ANNOUNCED .st{color:var(--violet)}
   .tasks .none{color:var(--dim)}
-  .power{display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-top:7px}
+  #demand{font-size:11px}
+  .zrow{display:flex; align-items:center; gap:6px; padding:1px 0}
+  .zrow b{width:16px; flex:none}
+  .zrow .bar{flex:1; height:7px; background:#1B2531; border-radius:3px; overflow:hidden}
+  .zrow .bar i{display:block; height:100%; background:#8B5CF6; border-radius:3px}
+  .zrow .pc{width:34px; text-align:right; color:var(--muted); flex:none}
+  .why{color:var(--muted); line-height:1.4; margin-top:6px}
+  .why b{color:#A78BFA}
+  #batts{max-height:180px; overflow-y:auto}
+  .batt{display:flex; align-items:center; gap:6px; font-size:11px; padding:1px 0}
+  .batt b{width:26px; flex:none}
+  .batt .bar{flex:1; height:7px; background:#1B2531; border-radius:3px; overflow:hidden}
+  .batt .bar i{display:block; height:100%; border-radius:3px}
+  .batt .pc{width:30px; text-align:right; color:var(--muted); flex:none}
+  .batt .st{width:56px; text-align:right; flex:none; font-size:10px}
+  .shelf{
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:10px;
+    background:#1B2531; color:#8FB3D9; border-radius:3px; padding:1px 4px;
+  }
+  .power{display:grid; grid-template-columns:repeat(3,1fr); gap:6px; max-height:150px; overflow-y:auto}
   .power button{font-size:11px; padding:6px 4px}
   .power button.dead{border-color:var(--red); color:var(--red); background:rgba(248,113,113,.10)}
   .log div.order span{color:var(--cyan)}
   .log div.task span{color:var(--green)}
+
+  /* ---------- Phase 14: network down ---------- */
+  .badge.SAFE_MODE{background:rgba(245,184,65,.2); color:var(--amber)}
+  .netdown{
+    flex:none; background:rgba(245,184,65,.14); border-bottom:1px solid rgba(245,184,65,.4);
+    color:var(--amber); font-size:12px; padding:8px 20px; display:none;
+    gap:10px; align-items:center; letter-spacing:.02em;
+  }
+  .netdown.on{display:flex; animation:blink 2.2s infinite}
+  .netdown b{color:#FCD34D}
+  @keyframes blink{0%,100%{opacity:1}50%{opacity:.72}}
 
   /* ---------- Phase 8: obstacles ---------- */
   .badge.BLOCKED{background:rgba(248,113,113,.16); color:var(--red)}
@@ -248,7 +304,7 @@
 
   .msgs{font-family:var(--mono); font-size:10.5px; display:flex; flex-direction:column; gap:3px}
   .msgs div{display:flex; gap:6px; color:var(--muted); white-space:nowrap; overflow:hidden}
-  .msgs .mt{flex:none; width:64px}
+  .msgs .mt{flex:none; width:72px; overflow:hidden}
   .msgs .HEARTBEAT .mt{color:var(--dim)}
   .msgs .POSE_UPDATE .mt{color:#5B7A99}
   .msgs .INTENT_UPDATE .mt{color:var(--cyan)}
@@ -283,6 +339,20 @@
     <span>Press <b>Start orders</b>. Each job is shouted to the fleet and robots <b>bid</b> for it &mdash; cheapest wins, and nobody hands the work out. Kill a robot mid&#8209;job and watch its work get rescued.</span>
   </div>
 
+  <div class="netdown" id="stale" style="background:rgba(248,113,113,.16);border-color:rgba(248,113,113,.5);color:#FCA5A5">
+    <b>&#8635; THIS PAGE IS OUT OF DATE</b>
+    <span>The code changed after this tab was opened, so you are looking at an
+      old version of the dashboard &mdash; buttons fixed since then will still
+      look broken. <b>Reload the page</b> (Cmd&#8209;R) to pick it up.</span>
+  </div>
+
+  <div class="netdown" id="netdown">
+    <b>&#128246; NETWORK DOWN</b>
+    <span>Robots are on their own sensors. They finish what they are carrying,
+      keep out of each other's way, and take no new work. Nothing new can reach
+      them until the link is back.</span>
+  </div>
+
   <div class="kpis" id="kpis"></div>
 
   <main>
@@ -293,9 +363,43 @@
     </div>
 
     <aside>
+      <div class="sec controls-fixed">
+        <h2>Controls</h2>
+        <div id="haltBanner"></div>
+        <div class="btns" style="margin-bottom:7px">
+          <button data-fleet="add">+ Add robot</button>
+          <button data-fleet="remove">− Remove robot</button>
+          <button data-scen="orders">Start orders</button>
+          <button data-scen="stop">Stop all</button>
+        </div>
+        <div class="slider" style="margin:0">
+          <label>Order rate</label>
+          <input type="range" id="rate" min="1" max="24" step="1" value="16">
+          <span class="val" id="rateVal">—</span>
+        </div>
+      </div>
+
       <div class="sec">
-        <h2>Fleet <em id="selNote">&mdash; click one to control it</em></h2>
+        <h2>Fleet <em id="selNote">— click one to control it</em></h2>
         <div id="robots"></div>
+      </div>
+
+      <div class="sec">
+        <h2>Power <em>&mdash; fail one and watch the others cover</em></h2>
+        <div class="power" id="power"></div>
+      </div>
+
+      <div class="sec">
+        <h2>Where the work is <em id="predNote"></em></h2>
+        <div id="demand"></div>
+      </div>
+
+      <div class="sec">
+        <h2>Battery <em id="battNote"></em></h2>
+        <div class="btns" style="margin-bottom:8px">
+          <button class="wide" id="drainBtn">&#9211; Drain batteries</button>
+        </div>
+        <div id="batts"></div>
       </div>
 
       <div class="sec">
@@ -325,8 +429,7 @@
           <button data-scen="orders">Start orders</button>
           <button data-scen="patrol">Stop orders</button>
         </div>
-        <div class="power" id="power"></div>
-        <div class="tasks" id="tasks" style="margin-top:11px"></div>
+        <div class="tasks" id="tasks"></div>
       </div>
 
       <div class="sec">
@@ -343,6 +446,7 @@
       <div class="sec">
         <h2>Scenarios <em id="scenNote"></em></h2>
         <div class="btns">
+          <button class="wide" id="cutNet">&#128246; Cut the network</button>
           <button data-scen="head_on">Head&#8209;on</button>
           <button data-scen="intersection">Intersection</button>
           <button data-scen="patrol">Free roam</button>
@@ -375,13 +479,17 @@
       <div class="sec">
         <h2>Map key</h2>
         <div class="legend">
-          <div><i class="sw" style="background:#1B2531"></i> Shelf &mdash; cannot drive here</div>
+          <div style="color:var(--muted);margin-bottom:2px">Coloured squares are the <b>building</b>. They never move.</div>
+          <div><i class="sw" style="background:#1B2531"></i> Shelf &mdash; racks are named by aisle, e.g. <span class="shelf">A14</span>. Hover one to see what is on it</div>
           <div><i class="sw" style="background:#0D1319"></i> Aisle &mdash; open floor</div>
-          <div><i class="sw" style="background:#1B3A2E"></i> Pick station</div>
-          <div><i class="sw" style="background:#123240"></i> Drop / packing</div>
-          <div><i class="sw" style="background:#3A2E12"></i> Charger</div>
+          <div><i class="sw" style="background:#123240"></i> Packing bay &mdash; the 10 places an order can be delivered</div>
+          <div><i class="sw" style="background:#3A2E12"></i> Charging bay &mdash; 4 of them, booked like any other square</div>
+          <div style="color:var(--muted);margin:5px 0 2px">Shapes are the <b>work</b>. One pair per live order.</div>
+          <div><i class="sw" style="background:#22D3EE"></i> <b>Diamond</b> &mdash; collect this order here, off the shelf beside it</div>
+          <div><i class="sw" style="background:#22D3EE"></i> <b>Star</b> &mdash; deliver it here. A star always sits on a packing bay</div>
+          <div><i class="sw" style="background:#A78BFA"></i> <b>Dashed ring</b> &mdash; a robot waiting there on a hunch, not a job. See "Where the work is"</div>
+          <div style="color:var(--muted);margin-bottom:4px">Both are drawn in the colour of the robot that won the job.</div>
           <div><i class="sw" style="background:#22D3EE;opacity:.35"></i> Tinted square &mdash; booked by the selected robot</div>
-          <div><i class="sw" style="background:#22D3EE"></i> Diamond &mdash; collect from here &middot; Star &mdash; deliver to here</div>
           <div><i class="sw" style="background:#7F1D1D"></i> Hatched red &mdash; obstacle a robot has found</div>
           <div><i class="sw" style="background:#34D399"></i> Green robot &mdash; stepping out of the way</div>
           <div><i class="sw" style="background:#F5B841"></i> Amber ring + countdown &mdash; predicted conflict</div>
@@ -408,24 +516,104 @@ const C = {
   chg:"#3A2E12", chgE:"#7A5F1E",
   red:"#F87171", muted:"#7A8899"
 };
-// One colour per robot, so you can tell them apart on the map and in the list.
-const ROBOT_COLORS = ["#22D3EE", "#F5B841", "#A78BFA"];
-const colorFor = (id) => {
-  if (!STATE) return ROBOT_COLORS[0];
-  const i = STATE.robots.findIndex(r => r.robot_id === id);
-  return ROBOT_COLORS[(i < 0 ? 0 : i) % ROBOT_COLORS.length];
-};
+// One colour per robot, decided by its NAME and nothing else.
+//
+// It used to be decided by the robot's position in the list, which meant the
+// colours shuffled the moment a robot was added, removed or reordered. Derive
+// it from the number in the name and R7 is the same colour for ever.
+const ROBOT_COLORS = [
+  "#22D3EE", "#F5B841", "#A78BFA", "#34D399", "#F87171",
+  "#60A5FA", "#FB923C", "#F472B6", "#A3E635", "#2DD4BF",
+];
+function colorFor(id){
+  const n = parseInt(String(id).replace(/\D/g, ""), 10);
+  return ROBOT_COLORS[(isNaN(n) ? 0 : n - 1 + ROBOT_COLORS.length) % ROBOT_COLORS.length];
+}
 
 // ---------------------------------------------------------------- state
 let MAP = null;            // the warehouse, fetched once
+
+// Phase 11: rack name -> what is on it, and floor square -> the racks you can
+// reach from it. Built once; the map never changes, so neither do these.
+let SHELF_BY_CELL = new Map();     // "x,y" of the RACK      -> shelf
+let SHELF_BY_FACE = new Map();     // "x,y" of the FLOOR sq  -> [shelves]
+function buildShelfIndex(){
+  SHELF_BY_CELL = new Map(); SHELF_BY_FACE = new Map();
+  for (const sh of (MAP.shelves || [])){
+    SHELF_BY_CELL.set(`${sh.cell[0]},${sh.cell[1]}`, sh);
+    const k = `${sh.face[0]},${sh.face[1]}`;
+    if (!SHELF_BY_FACE.has(k)) SHELF_BY_FACE.set(k, []);
+    SHELF_BY_FACE.get(k).push(sh);
+  }
+}
+// The rack name for a floor square you collect from. An order says A14; this
+// is what turns the square the robot drives to back into that name.
+function shelfAt(cell){
+  const list = SHELF_BY_FACE.get(`${cell[0]},${cell[1]}`) || [];
+  return list.length ? list.map(s => s.name).join("/") : null;
+}
 let STATE = null;          // latest fleet snapshot
 let CELL = 24, OX = 0, OY = 0;
 let hover = null;
 let selected = "R1";       // which robot your clicks control
+
+// The dashboard only ever shows one robot's world-picture at a time, so ask
+// the server for just that one. Sending all of them was 78% of the traffic.
+function sendFocus(){
+  fetch("/api/focus", {method:"POST", headers:{"Content-Type":"application/json"},
+                       body: JSON.stringify({robot_id: selected})}).catch(() => {});
+}
 let lastCollisions = 0;
 const seenEvents = new Set();   // collision ids already logged
 const bursts = [];              // red flashes currently animating
 const events = [];
+
+// Stamped by the server when it handed this page over. If the live stamp ever
+// differs, this tab is running old code.
+const PAGE_BUILD = "__PAGE_BUILD__";
+
+// Replacing a panel's innerHTML throws away every element inside it and makes
+// new ones. Do that twenty times a second and a button cannot be clicked: the
+// element you pressed on is gone before you let go. It also forces the browser
+// to re-lay-out the whole sidebar, which is what made it jump about.
+//
+// So: only touch the DOM when the HTML has actually changed.
+const PANEL_MS = 200;        // sidebar refresh: 5 times a second
+let lastPanels = 0;
+
+const _lastHTML = new Map();
+// A click only counts if the press and the release land on the SAME element.
+// If a redraw replaces that element in between, the browser fires no click at
+// all -- which is exactly why Fail and Stop all felt dead under load. So while
+// any mouse button is held down we queue panel rewrites instead of doing them,
+// and flush the queue shortly after the release, once the click has gone out.
+let _held = false;
+const _pending = new Map();
+
+function writeHTML(id, html){
+  const el = document.getElementById(id);
+  if (!el) return;
+  _lastHTML.set(id, html);
+  el.innerHTML = html;
+}
+
+function setHTML(id, html){
+  if (_lastHTML.get(id) === html) return;          // nothing changed, leave it alone
+  if (_held){ _pending.set(id, html); return; }    // hands off, someone is pressing
+  writeHTML(id, html);
+}
+
+function releaseHold(){
+  if (!_held) return;
+  _held = false;
+  for (const [id, html] of _pending) writeHTML(id, html);
+  _pending.clear();
+}
+
+addEventListener("pointerdown", () => { _held = true; }, true);
+addEventListener("pointerup",     () => setTimeout(releaseHold, 50), true);
+addEventListener("pointercancel", () => setTimeout(releaseHold, 50), true);
+addEventListener("blur", releaseHold);
 
 const cv  = document.getElementById("cv");
 const ctx = cv.getContext("2d");
@@ -433,8 +621,11 @@ const ctx = cv.getContext("2d");
 // ---------------------------------------------------------------- boot
 async function boot(){
   MAP = await (await fetch("/api/map")).json();
+  buildShelfIndex();
   layout();
   bindNetwork();
+  bindRate();
+  sendFocus();
   connect();
   requestAnimationFrame(draw);
 }
@@ -447,23 +638,46 @@ function connect(){
     const prev = STATE;
     STATE = JSON.parse(e.data);
     setLive(true);
+
+    // If the robot you were watching was removed or the fleet was rebuilt,
+    // fall back to the first one so the panels never go blank.
+    if (STATE.robots.length && !STATE.robots.some(r => r.robot_id === selected)){
+      selected = STATE.robots[0].robot_id;
+      sendFocus();
+    }
+
+    // The MAP is drawn every animation frame from the newest state, so motion
+    // stays smooth. The sidebar only needs to keep up with reading speed --
+    // rebuilding a dozen text panels twenty times a second was most of the
+    // work and none of the benefit.
+    const now = performance.now();
+    if (now - lastPanels < PANEL_MS) { watchAll(prev); return; }
+    lastPanels = now;
     renderKpis();
     renderRobots();
     renderScenario();
     renderDecisions();
     renderTasks();
     renderBlocks();
+    renderNetwork();
+    renderStale();
+    renderRate();
     renderWaitGraph();
     renderReservations();
     renderConflicts();
     renderToggles();
     renderSees();
-    watchForEvents(prev, STATE);
-    watchConflicts(STATE);
-    watchDecisions(STATE);
-    catchCollisions(STATE);
+    watchAll(prev);
   };
 }
+// Things that must see EVERY update or they miss an event entirely.
+function watchAll(prev){
+  watchForEvents(prev, STATE);
+  watchConflicts(STATE);
+  watchDecisions(STATE);
+  catchCollisions(STATE);
+}
+
 function setLive(on){
   const el = document.getElementById("live");
   el.className = "live " + (on ? "on" : "off");
@@ -489,7 +703,7 @@ window.addEventListener("resize", () => { if (MAP) layout(); });
 function draw(){
   if (MAP){
     drawMap();
-    if (STATE){ drawBookings(); drawObstacles(); drawJobs(); drawBeliefs(); drawPaths(); drawGoals(); drawConflicts(); drawRobots(); }
+    if (STATE){ drawBookings(); drawObstacles(); drawJobs(); drawStaging(); drawBeliefs(); drawPaths(); drawGoals(); drawConflicts(); drawRobots(); }
     drawBursts();
     drawHover();
   }
@@ -513,7 +727,20 @@ function drawMap(){
       if (kind === "SHELF"){
         ctx.fillStyle = C.shelf; ctx.fillRect(px+1, py+1, CELL-2, CELL-2);
         ctx.fillStyle = C.shelfTop; ctx.fillRect(px+1, py+1, CELL-2, Math.max(2, CELL*0.16));
+        // Phase 11: the rack's own number, faint. 120 of them would be noise
+        // at a glance, so they only appear once the squares are big enough to
+        // read, and the aisle letter below is what you navigate by.
+        const sh = SHELF_BY_CELL.get(`${x},${y}`);
+        if (sh && CELL >= 22){
+          ctx.fillStyle = "#3E5063";
+          ctx.font = `${Math.round(CELL*0.3)}px ui-monospace,Menlo,monospace`;
+          ctx.textAlign="center"; ctx.textBaseline="middle";
+          ctx.fillText(sh.name, px+CELL/2, py+CELL/2+CELL*0.08);
+        }
       } else {
+        // PICK squares no longer exist on the map -- orders are collected from
+        // the floor beside a shelf -- but keep the colours so an older map file
+        // still draws correctly.
         const fill = kind==="PICK" ? C.pick : kind==="DROP" ? C.drop : C.chg;
         const edge = kind==="PICK" ? C.pickE: kind==="DROP" ? C.dropE: C.chgE;
         ctx.fillStyle = fill; ctx.fillRect(px+1, py+1, CELL-2, CELL-2);
@@ -527,6 +754,54 @@ function drawMap(){
         }
       }
     }
+  }
+  drawAisleLetters();
+}
+
+// One big faint letter per block of racks. This is the warehouse sign you look
+// up at: it is how you find aisle A without being told where it is, and it is
+// what makes "shelf A14" in an order mean something on the map.
+function drawAisleLetters(){
+  if (!MAP.shelves || !MAP.shelves.length || CELL < 12) return;
+  const spans = new Map();                       // letter -> x/y extent
+  for (const sh of MAP.shelves){
+    const L = sh.name[0];
+    const e = spans.get(L) || {x0: 1e9, x1: -1e9, y0: 1e9};
+    e.x0 = Math.min(e.x0, sh.cell[0]); e.x1 = Math.max(e.x1, sh.cell[0]);
+    e.y0 = Math.min(e.y0, sh.cell[1]);
+    spans.set(L, e);
+  }
+  ctx.save();
+  ctx.font = `700 ${Math.round(CELL*0.85)}px ui-monospace,Menlo,monospace`;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillStyle = "rgba(143,179,217,.34)";
+  for (const [L, e] of spans){
+    const cx = ((e.x0 + e.x1) / 2 + 0.5) * CELL;
+    ctx.fillText(L, cx, (e.y0 - 0.5) * CELL);
+  }
+  ctx.restore();
+}
+
+// Phase 12. Where a robot has gone to WAIT on a hunch. Drawn as a dashed ring
+// rather than a solid marker on purpose: it is a guess, not a job, and it
+// should not look like one.
+function drawStaging(){
+  for (const r of STATE.robots){
+    if (!r.staging || !r.staging_why) continue;
+    const cx = r.staging[0]*CELL + CELL/2, cy = r.staging[1]*CELL + CELL/2;
+    ctx.save();
+    ctx.strokeStyle = "#A78BFA"; ctx.globalAlpha = .75;
+    ctx.lineWidth = Math.max(1.2, CELL*0.06);
+    ctx.setLineDash([CELL*0.16, CELL*0.14]);
+    ctx.beginPath(); ctx.arc(cx, cy, CELL*0.34, 0, Math.PI*2); ctx.stroke();
+    ctx.setLineDash([]);
+    if (CELL >= 18){
+      ctx.fillStyle = "#A78BFA";
+      ctx.font = `600 ${Math.round(CELL*0.3)}px ui-monospace,Menlo,monospace`;
+      ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText(r.robot_id, cx, cy);
+    }
+    ctx.restore();
   }
 }
 
@@ -583,6 +858,14 @@ function drawJobs(){
       ctx.beginPath();
       ctx.moveTo(cx, cy-r); ctx.lineTo(cx+r, cy);
       ctx.lineTo(cx, cy+r); ctx.lineTo(cx-r, cy); ctx.closePath(); ctx.stroke();
+      // Phase 11: the rack name next to the diamond, so "shelf A14" in the
+      // order list and the diamond on the map are visibly the same place.
+      if (job.shelf && CELL >= 16){
+        ctx.font = `600 ${Math.round(CELL*0.34)}px ui-monospace, Menlo, monospace`;
+        ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+        ctx.fillStyle = col;
+        ctx.fillText(job.shelf, cx, cy - r - 1);
+      }
     }
     {                                                  // star = deliver here
       const cx = job.dropoff[0]*CELL+CELL/2, cy = job.dropoff[1]*CELL+CELL/2;
@@ -775,10 +1058,16 @@ function drawRobots(){
   for (const r of STATE.robots){
     const cx = r.x*CELL + CELL/2, cy = r.y*CELL + CELL/2;
     const rad = CELL*0.34;
-    const col = r.status==="BLOCKED" ? C.red
-              : r.status==="WAITING" ? C.amber
-              : r.status==="REROUTING" ? "#A78BFA"
-              : r.status==="YIELDING" ? C.green : colorFor(r.robot_id);
+    // The robot's own colour, ALWAYS. Status used to overwrite it -- two
+    // robots meeting both turned amber and looked like one colour, and
+    // REROUTING turned them violet, which is R3's colour. Status now shows as
+    // a ring around the robot instead, so identity is never lost.
+    const col = colorFor(r.robot_id);
+    const statusRing = r.status==="BLOCKED" ? C.red
+                     : r.status==="WAITING" ? C.amber
+                     : r.status==="REROUTING" ? "#A78BFA"
+                     : r.status==="YIELDING" ? C.green
+                     : r.status==="SAFE_MODE" ? C.amber : null;
     const isSel = r.robot_id === selected;
 
     ctx.save();
@@ -798,17 +1087,35 @@ function drawRobots(){
     ctx.strokeStyle = col; ctx.lineWidth = Math.max(2, CELL*0.10);
     ctx.beginPath(); ctx.arc(cx, cy, rad, 0, Math.PI*2); ctx.stroke();
 
+    // status as an outer ring, so the body keeps the robot's own colour
+    if (statusRing){
+      ctx.strokeStyle = statusRing;
+      ctx.lineWidth = Math.max(1.5, CELL*0.075);
+      ctx.globalAlpha = .95;
+      ctx.beginPath(); ctx.arc(cx, cy, rad*1.42, 0, Math.PI*2); ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
+
     const d = NOSE[r.heading] || NOSE.E;
     ctx.fillStyle = col;
     ctx.beginPath();
     ctx.arc(cx + d[0]*rad*0.72, cy + d[1]*rad*0.72, Math.max(1.5, CELL*0.085), 0, Math.PI*2);
     ctx.fill();
 
-    if (CELL >= 18){
-      ctx.fillStyle = col;
-      ctx.font = `700 ${Math.floor(CELL*0.34)}px ui-monospace,Menlo,monospace`;
+    // Always draw the name -- it used to vanish whenever the squares got
+    // small, which is exactly when there are lots of robots and you most
+    // need to tell them apart. A dark plate behind it keeps it readable.
+    {
+      const fs = Math.max(9, Math.floor(CELL*0.34));
+      ctx.font = `700 ${fs}px ui-monospace,Menlo,monospace`;
       ctx.textAlign="center"; ctx.textBaseline="bottom";
-      ctx.fillText(r.robot_id, cx, cy - rad - 3);
+      const label = r.robot_id;
+      const w = ctx.measureText(label).width;
+      const ly = cy - rad - 2;
+      ctx.globalAlpha = .78; ctx.fillStyle = "#0A0E13";
+      ctx.fillRect(cx - w/2 - 2, ly - fs, w + 4, fs + 2);
+      ctx.globalAlpha = 1; ctx.fillStyle = col;
+      ctx.fillText(label, cx, ly);
     }
     // held up: a small bar showing which way it is being stopped
     if (r.status === "WAITING"){
@@ -908,6 +1215,27 @@ function showEta(evt){
     }
   }
 
+  // Phase 11. Hovering a rack tells you its name and what is on it, and
+  // hovering the floor square in front of it tells you which racks it serves.
+  // That is how you check for yourself that "shelf A14" really is the square
+  // the robot drove to.
+  const rack = SHELF_BY_CELL.get(`${hover.x},${hover.y}`);
+  const faces = SHELF_BY_FACE.get(`${hover.x},${hover.y}`) || [];
+  if (rack || faces.length){
+    const wrap0 = cv.parentElement.getBoundingClientRect();
+    box.innerHTML = rack
+      ? `<div><span class="shelf">${rack.name}</span> &nbsp;${rack.product}</div>
+         <div style="color:#7A8899">${rack.stock} in stock &middot; collect from
+         (${rack.face[0]}, ${rack.face[1]})</div>`
+      : `<div style="color:#7A8899">square (${hover.x}, ${hover.y}) &mdash; collect point for</div>` +
+        faces.map(f => `<div><span class="shelf">${f.name}</span> &nbsp;${f.product}
+                        <span style="color:#7A8899">(${f.stock})</span></div>`).join("");
+    box.style.display = "block";
+    box.style.left = (evt.clientX - wrap0.left + 16) + "px";
+    box.style.top  = (evt.clientY - wrap0.top  + 16) + "px";
+    return;
+  }
+
   if (!rows.length){ box.style.display = "none"; return; }
   rows.sort((a,b) => a.eta - b.eta);
 
@@ -947,8 +1275,23 @@ document.getElementById("dropMode").addEventListener("click", () => {
     : "Back to sending robots. Click a floor square.");
 });
 
+let netDown = false;
+document.getElementById("cutNet").addEventListener("click", async () => {
+  netDown = !netDown;
+  const out = await post("/api/cut", {down: netDown});
+  const b = document.getElementById("cutNet");
+  b.textContent = netDown ? "\u2713 Restore the network" : "\ud83d\udcf5 Cut the network";
+  b.classList.toggle("on", netDown);
+  showHint(out.message); log(out.message);
+});
+
 document.getElementById("clearObs").addEventListener("click", async () => {
   const out = await post("/api/obstacle", {action: "clear"});
+  showHint(out.message); log(out.message);
+});
+
+document.getElementById("drainBtn").addEventListener("click", async () => {
+  const out = await post("/api/battery", {});
   showHint(out.message); log(out.message);
 });
 
@@ -996,32 +1339,111 @@ const TASK_LABEL = {ANNOUNCED:"for bids", ASSIGNED:"collecting",
 function renderTasks(){
   const k = STATE.kpis;
   document.getElementById("taskNote").textContent =
-    `— ${k.task_done}/${k.task_created} done` +
+    (k.task_created ? `— ${k.task_done}/${k.task_created} done`
+                    : "— press Start orders to give them work") +
     (k.task_avg_task_time ? `, avg ${k.task_avg_task_time}s` : "");
 
   const rows = STATE.tasks || [];
-  document.getElementById("tasks").innerHTML = rows.length
+  setHTML("tasks", rows.length
     ? rows.map(t => `<div class="row ${t.status}">
         <span class="tid">${t.task_id}</span>
-        <span class="leg">(${t.pickup[0]},${t.pickup[1]})&rarr;(${t.dropoff[0]},${t.dropoff[1]})${
+        <span class="leg" title="collect (${t.pickup[0]},${t.pickup[1]}) &rarr; deliver (${t.dropoff[0]},${t.dropoff[1]})">${
+          t.shelf ? `${t.product} <b>&times;${t.quantity}</b> &middot; <span class="shelf">${t.shelf}</span>`
+                  : `(${t.pickup[0]},${t.pickup[1]})&rarr;(${t.dropoff[0]},${t.dropoff[1]})`}${
           t.reassignments ? ` <span style="color:var(--amber)">&#8635;${t.reassignments}</span>` : ""}</span>
         <span class="who" style="color:${t.assigned_robot ? colorFor(t.assigned_robot) : "var(--dim)"}">${t.assigned_robot || "—"}</span>
         <span class="st">${TASK_LABEL[t.status] || t.status}</span>
       </div>`).join("")
-    : `<div class="none">no jobs yet — press Start orders</div>`;
+    : `<div class="none">no jobs yet — press Start orders</div>`);
 
-  document.getElementById("power").innerHTML = STATE.robots.map(r => {
+  renderDemand();
+
+  const batts = STATE.robots.slice().sort((a,b) => a.battery - b.battery);
+  const lowest = batts.length ? batts[0].battery : 100;
+  const onCharge = STATE.robots.filter(r => r.charging).length;
+  const going = STATE.robots.filter(r => r.charger && !r.charging).length;
+  document.getElementById("battNote").textContent =
+    `— lowest ${lowest.toFixed(0)}%` + (onCharge ? `, ${onCharge} charging` : "")
+    + (going ? `, ${going} heading to a bay` : "");
+  setHTML("batts", batts.map(r => {
+    const pc = Math.max(0, Math.min(100, r.battery));
+    // Colour by how worried you should be, not by the robot's own colour --
+    // this panel is about charge, and a red bar must mean "nearly flat".
+    const col = pc < 15 ? "var(--red)" : pc < 35 ? "var(--amber)" : "#34D399";
+    const state = r.charging ? `<span style="color:#34D399">charging</span>`
+                : r.charger  ? `<span style="color:var(--amber)">to bay</span>`
+                : "";
+    return `<div class="batt">
+      <b style="color:${colorFor(r.robot_id)}">${r.robot_id}</b>
+      <span class="bar"><i style="width:${pc}%;background:${col}"></i></span>
+      <span class="pc">${pc.toFixed(0)}%</span>
+      <span class="st">${state}</span></div>`;
+  }).join(""));
+
+  setHTML("power", STATE.robots.map(r => {
     const dead = r.status === "FAILED";
     return `<button class="${dead?"dead":""}" data-power="${r.robot_id}" data-alive="${dead?1:0}">
       ${dead ? "Revive" : "Fail"} ${r.robot_id}</button>`;
-  }).join("");
-  document.querySelectorAll("[data-power]").forEach(b => {
-    b.addEventListener("click", async () => {
-      const out = await post("/api/power",
-        {robot_id: b.dataset.power, alive: b.dataset.alive === "1"});
-      showHint(out.message); log(out.message);
-    });
-  });
+  }).join(""));
+}
+
+// Phase 12. What the fleet has worked out about where the orders come from,
+// and what it did about it. Shown as the counts it actually learned from, so
+// the reasoning is checkable rather than a black box.
+function renderDemand(){
+  const d = STATE.demand || {};
+  const note = document.getElementById("predNote");
+  const moved = STATE.robots.filter(r => r.staging_why);
+
+  if (!d.ready){
+    note.textContent = `— learning (${d.orders_seen || 0} orders so far)`;
+    setHTML("demand", `<div class="none">not enough orders yet to have an opinion</div>`);
+    return;
+  }
+  note.textContent = d.busiest ? `— aisle ${d.busiest} looks busiest` : "— no aisle stands out";
+
+  const top = Math.max(...(d.zones || []).map(z => z.score), 0.001);
+  setHTML("demand",
+    (d.zones || []).map(z => `<div class="zrow">
+        <b style="color:${z.zone === d.busiest ? "#A78BFA" : "var(--muted)"}">${z.zone}</b>
+        <span class="bar"><i style="width:${Math.round(100*z.score/top)}%;${
+          z.zone === d.busiest ? "" : "background:#3E5063"}"></i></span>
+        <span class="pc">${Math.round(z.share*100)}%</span>
+      </div>`).join("")
+    + (d.reason ? `<div class="why">${d.reason}</div>` : "")
+    + (moved.length
+        ? moved.map(r => `<div class="why">&rarr; <b style="color:${colorFor(r.robot_id)}">${
+            r.robot_id}</b> ${r.staging_why}</div>`).join("")
+        : `<div class="why">nobody is idle enough to move on it</div>`));
+}
+
+function renderRate(){
+  const every = STATE.order_every;
+  const el = document.getElementById("rateVal");
+  if (!every){ el.textContent = "no orders"; return; }
+  el.textContent = every < 1 ? `${Math.round(60/every)}/min`
+                             : `1 per ${every.toFixed(every<2?1:0)}s`;
+}
+
+function renderStale(){
+  const live = STATE.build;
+  const stale = live && PAGE_BUILD && live !== PAGE_BUILD;
+  document.getElementById("stale").classList.toggle("on", !!stale);
+  // The server loads the brain once at startup, so a .py edit after that does
+  // nothing until it is restarted.
+  if (STATE.server_build && STATE.build && STATE.server_build !== STATE.build){
+    const el = document.getElementById("stale");
+    el.classList.add("on");
+    el.querySelector("span").innerHTML =
+      "The code on disk changed after the server started, so the <b>server</b> "
+      + "is running an old version too. Stop it (Ctrl&#8209;C) and run "
+      + "<code>python3 grid_sim/run.py</code> again, then reload this page.";
+  }
+}
+
+function renderNetwork(){
+  const down = (STATE.kpis.safe_mode || 0) > 0;
+  document.getElementById("netdown").classList.toggle("on", down);
 }
 
 function renderBlocks(){
@@ -1030,35 +1452,35 @@ function renderBlocks(){
   const real = (STATE.obstacles || []).length;
   document.getElementById("obsNote").textContent =
     `— ${real} on the floor, ${rows.length} known to ${selected}`;
-  document.getElementById("blocks").innerHTML = rows.length
+  setHTML("blocks", rows.length
     ? rows.map(b => `<div>
         <span style="color:var(--red)">&#9646;</span>
         <span>(${b.cell[0]}, ${b.cell[1]})</span>
         <span style="color:var(--dim)">found by ${b.reported_by}</span>
         <span style="margin-left:auto;color:var(--dim)">fades in ${b.remaining}s</span>
       </div>`).join("")
-    : `<div class="none">${selected} knows of nothing in the way</div>`;
+    : `<div class="none">${selected} knows of nothing in the way</div>`);
 }
 
 function renderWaitGraph(){
   const rows = STATE.wait_graph || [];
-  document.getElementById("waitg").innerHTML = rows.length
+  setHTML("waitg", rows.length
     ? rows.map(r => `<div>
         <b style="color:${colorFor(r.robot_id)}">${r.robot_id}</b>
         <span>waiting for</span>
         <b style="color:${colorFor(r.blocked_by)}">${r.blocked_by}</b>
         <span style="margin-left:auto;color:var(--dim)">${r.waiting}s</span>
       </div>`).join("")
-    : `<div class="none">nobody is waiting for anybody</div>`;
+    : `<div class="none">nobody is waiting for anybody</div>`);
 }
 
 function renderDecisions(){
   const list = STATE.decisions || [];
   document.getElementById("decNote").textContent =
     `— ${STATE.kpis.reroutes} reroute${STATE.kpis.reroutes === 1 ? "" : "s"}`;
-  document.getElementById("decisions").innerHTML = list.length
+  setHTML("decisions", list.length
     ? list.map(d => `<div><time>${d.sim_time.toFixed(1)}s</time><span>${d.text}</span></div>`).join("")
-    : `<div class="none">nobody has had to give way yet</div>`;
+    : `<div class="none">nobody has had to give way yet</div>`);
 }
 
 // ---------------------------------------------- Phase 5: booking table
@@ -1115,27 +1537,36 @@ function renderConflicts(){
 // ------------------------------------------------- Phase 3: radio controls
 function renderToggles(){
   const silenced = new Set((STATE.bus && STATE.bus.silenced) || []);
-  document.getElementById("toggles").innerHTML = STATE.robots.map(r => {
+  setHTML("toggles", STATE.robots.map(r => {
     const off = silenced.has(r.robot_id);
     return `<div class="tog ${off?"mute":""}" data-mute="${r.robot_id}">
       <span class="rid2" style="color:${colorFor(r.robot_id)}">${r.robot_id}</span>
       <span style="color:var(--muted)">${off ? "transmitter off" : "broadcasting"}</span>
       <span class="st">${off ? "SILENCED" : String(r.messages_sent)}</span>
     </div>`;
-  }).join("");
-
-  document.querySelectorAll("[data-mute]").forEach(el => {
-    el.addEventListener("click", async () => {
-      const rid = el.dataset.mute;
-      const on = !silenced.has(rid);
-      const out = await post("/api/silence", {robot_id: rid, on});
-      showHint(out.message); log(out.message);
-    });
-  });
+  }).join(""));
 
   const b = STATE.bus || {};
   document.getElementById("commsNote").textContent =
     `— ${b.delivered || 0} delivered, ${b.dropped || 0} lost`;
+}
+
+function bindRate(){
+  const el = document.getElementById("rate");
+  // Slider runs fast -> slow, because "more orders" should mean "drag right"
+  // is wrong here: dragging right should mean MORE work, so invert it.
+  const secondsFor = v => (25 - +v) / 4;      // 24 -> 0.25s, 1 -> 6s
+  const show = v => {
+    const s = secondsFor(v);
+    document.getElementById("rateVal").textContent =
+      s < 1 ? `${Math.round(60/s)}/min` : `1 per ${s.toFixed(s<2?1:0)}s`;
+  };
+  el.addEventListener("input", () => show(el.value));
+  el.addEventListener("change", async () => {
+    const out = await post("/api/rate", {every: secondsFor(el.value)});
+    showHint(out.message); log(out.message);
+  });
+  show(el.value);
 }
 
 function bindNetwork(){
@@ -1166,16 +1597,40 @@ function renderSees(){
     ).join("");
   }
 
-  document.getElementById("msgs").innerHTML = (STATE.messages || []).map(m => {
-    const extra = m.type === "INTENT_UPDATE"
-        ? (m.destination ? `dest (${m.destination[0]},${m.destination[1]}) eta ${m.eta_destination ?? "-"}s` : "no destination")
-      : m.type === "POSE_UPDATE" ? `(${m.x.toFixed(1)}, ${m.y.toFixed(1)}) v=${m.velocity}`
-      : `${m.battery}% ${m.status}`;
+  // Every message type gets its own line. The ticker knew about only three,
+  // so the eight added since all fell through to the battery line and printed
+  // "undefined% undefined" -- and the long names overflowed their column and
+  // ran into the robot id.
+  const DESCRIBE = {
+    POSE_UPDATE:      m => `(${m.x.toFixed(1)}, ${m.y.toFixed(1)}) v=${m.velocity}`,
+    INTENT_UPDATE:    m => m.destination
+        ? `heading for (${m.destination[0]},${m.destination[1]}), eta ${m.eta_destination ?? "?"}s`
+        : "no destination",
+    HEARTBEAT:        m => `${m.battery}% ${m.status}`,
+    CONFLICT_ALERT:   m => `${m.robot_a}/${m.robot_b} both want (${m.resource[0]},${m.resource[1]}) in ${m.estimated_time}s`,
+    PATH_RESERVATION: m => `${m.action === "CLAIM" ? "books" : "frees"} (${m.cells[0]},${m.cells[1]}) for ${m.start.toFixed(1)}-${m.end.toFixed(1)}s`,
+    BLOCKED_AISLE:    m => `(${m.cell[0]},${m.cell[1]}) ${m.cleared ? "is clear again" : "is blocked"}`,
+    WAIT_REPORT:      m => m.blocked_by ? `stuck behind ${m.blocked_by} (${m.waiting}s)` : "moving freely",
+    YIELD_REQUEST:    m => `asks ${m.target} to move off (${m.resource[0]},${m.resource[1]})`,
+    TASK_ANNOUNCE:    m => `${m.task_id}: ${m.product} from ${shelfAt(m.pickup) || `(${m.pickup[0]},${m.pickup[1]})`}`,
+    TASK_BID:         m => `${m.task_id} would cost ${m.cost}`,
+    TASK_CLAIM:       m => `${m.task_id} ${String(m.action).toLowerCase()}`,
+  };
+  const SHORT = {
+    POSE_UPDATE: "POS", INTENT_UPDATE: "INTENT", HEARTBEAT: "ALIVE",
+    CONFLICT_ALERT: "CONFLICT", PATH_RESERVATION: "BOOK",
+    BLOCKED_AISLE: "BLOCKED", WAIT_REPORT: "STUCK", YIELD_REQUEST: "MOVE?",
+    TASK_ANNOUNCE: "ORDER", TASK_BID: "BID", TASK_CLAIM: "JOB",
+  };
+  setHTML("msgs", (STATE.messages || []).map(m => {
+    let extra;
+    try { extra = (DESCRIBE[m.type] || (() => m.type))(m); }
+    catch (err) { extra = "(unreadable)"; }
     return `<div class="${m.type}">
-      <span class="mt">${m.type.replace("_UPDATE","")}</span>
+      <span class="mt">${SHORT[m.type] || m.type}</span>
       <span class="who" style="color:${colorFor(m.robot_id)}">${m.robot_id}</span>
       <span>${extra}</span></div>`;
-  }).join("");
+  }).join(""));
 }
 
 // ---------------------------------------------------------------- panels
@@ -1186,23 +1641,25 @@ function renderKpis(){
   const cells = [
     ["Robots",     k.robots,            ""],
     ["Collisions", k.collisions,        k.collisions ? "bad" : "good"],
-    ["Jobs done",  `${k.task_done}/${k.task_created}`, k.task_done ? "good" : ""],
+    ["Jobs done",  k.task_created ? `${k.task_done}/${k.task_created}` : "none yet",
+                   k.task_done ? "good" : ""],
     ["Avg job",    k.task_avg_task_time ? k.task_avg_task_time + "s" : "—", ""],
     ["Jobs/hr",    k.task_tasks_per_hour || 0, ""],
     ["Deadlocked", k.deadlocked,        k.deadlocked ? "bad" : "good"],
+    ["On sensors", k.safe_mode,         k.safe_mode ? "warn" : "good"],
     ["Obstacles",  k.obstacles,         k.obstacles ? "warn" : ""],
     ["Jams broken", k.deadlocks_broken,  ""],
     ["Reroutes",   k.reroutes,          ""],
     ["Sim time",   fmt(k.sim_time),     ""],
   ];
-  document.getElementById("kpis").innerHTML = cells.map(([kk,v,cls],i) =>
+  setHTML("kpis", cells.map(([kk,v,cls],i) =>
     `<div class="kpi ${(i===1 && hit) ? "hit" : ""}">
        <div class="k">${kk}</div><div class="v ${cls}">${v}</div>
-     </div>`).join("");
+     </div>`).join(""));
 }
 
 function renderRobots(){
-  document.getElementById("robots").innerHTML = STATE.robots.map(r => {
+  setHTML("robots", STATE.robots.map(r => {
     const col = colorFor(r.robot_id);
     const bcls = r.battery>50 ? "" : r.battery>20 ? "warn" : "bad";
     const goal = r.goal ? `${r.goal[0]}, ${r.goal[1]}` : "&mdash;";
@@ -1228,21 +1685,19 @@ function renderRobots(){
         ${r.waiting > 0.3 ? `<div><span>Stuck</span><span style="color:var(--amber)">${r.waiting.toFixed(1)}s</span></div>` : ""}
       </div>
     </div>`;
-  }).join("");
+  }).join(""));
 
-  document.querySelectorAll("[data-rid]").forEach(el => {
-    el.addEventListener("click", () => {
-      selected = el.dataset.rid;
-      document.getElementById("selNote").innerHTML =
-        `&mdash; clicks control <b style="color:${colorFor(selected)}">${selected}</b>`;
-      renderRobots(); renderSees(); renderReservations(); renderDecisions(); renderWaitGraph(); renderBlocks(); renderTasks();
-    });
-  });
 }
 
 function renderScenario(){
   const note = STATE.auto ? "free roam running" : STATE.scenario.replace("_"," ");
   document.getElementById("scenNote").textContent = "— " + note;
+  // Stop all is an emergency stop, so say so loudly. You should be able to see
+  // at a glance that the fleet really is stopped and not just idle.
+  const halted = (STATE.robots || []).filter(r => r.halted).length;
+  setHTML("haltBanner", halted
+    ? `<div class="halted">&#9632; STOPPED &mdash; ${halted} robot${halted>1?"s":""}
+       halted. Press Start orders or Free roam to release.</div>` : "");
   document.querySelectorAll("[data-scen]").forEach(b =>
     b.classList.toggle("on", b.dataset.scen === STATE.scenario));
 }
@@ -1369,6 +1824,52 @@ function fmt(s){
   const m = Math.floor(s/60), sec = Math.floor(s%60);
   return `${m}:${String(sec).padStart(2,"0")}`;
 }
+
+// ---------------------------------------------------------------- clicks
+//
+// These panels are rebuilt from scratch about twenty times a second. Attaching
+// a listener to each freshly-made button does not work: a click needs the mouse
+// to go DOWN and UP on the same element, and by the time you let go the button
+// you pressed has been thrown away and replaced. That is why "Fail R1" did
+// nothing at all.
+//
+// So listen once, on a parent that never gets replaced, and work out what was
+// clicked when it happens.
+document.addEventListener("click", async (e) => {
+  const power = e.target.closest("[data-power]");
+  if (power){
+    const out = await post("/api/power",
+      {robot_id: power.dataset.power, alive: power.dataset.alive === "1"});
+    showHint(out.message); log(out.message);
+    return;
+  }
+
+  const mute = e.target.closest("[data-mute]");
+  if (mute){
+    const silenced = new Set((STATE && STATE.bus && STATE.bus.silenced) || []);
+    const rid = mute.dataset.mute;
+    const out = await post("/api/silence", {robot_id: rid, on: !silenced.has(rid)});
+    showHint(out.message); log(out.message);
+    return;
+  }
+
+  const card = e.target.closest("[data-rid]");
+  if (card){
+    selected = card.dataset.rid;
+    sendFocus();
+    const note = document.getElementById("selNote");
+    if (note) note.innerHTML =
+      `&mdash; clicks control <b style="color:${colorFor(selected)}">${selected}</b>`;
+    if (STATE) { renderRobots(); renderSees(); renderReservations(); }
+    return;
+  }
+
+  const fleet = e.target.closest("[data-fleet]");
+  if (fleet){
+    const out = await post("/api/fleet", {action: fleet.dataset.fleet});
+    showHint(out.message); log(out.message);
+  }
+});
 
 boot();
 </script>

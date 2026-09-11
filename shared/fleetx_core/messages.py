@@ -314,6 +314,15 @@ class TaskAnnounce:
     pickup: Tuple[int, int]
     dropoff: Tuple[int, int]
     product: str = ""
+    # Phase 11. The shelf name and how many, carried with the order.
+    #
+    # Every robot builds its OWN copy of the job board from these messages, so
+    # anything missing here is missing from the robot's copy. Leaving the shelf
+    # name out meant the dashboard read "Mouse x2 from shelf A14" off the
+    # world's board while the robot doing the job had no idea what shelf it
+    # was -- two versions of the same order.
+    shelf: str = ""
+    quantity: int = 1
     priority: int = 5
     flexible: bool = False       # any packing station will do
 

@@ -23,6 +23,13 @@ PATROL: Dict[str, List[Tuple[int, int]]] = {
     "R3": [(13, 15), (13, 0)],
 }
 
+# Squares the Head-on and Intersection demos put robots down on. Nothing may
+# be parked here, or the demo cannot stage itself.
+STAGING_CELLS = frozenset([
+    Cell(4, 8), Cell(24, 8), Cell(26, 0),          # head-on
+    Cell(5, 8), Cell(21, 8), Cell(13, 0),          # intersection
+])
+
 
 class Scenarios:
     """Sets up the demo situations from 08_SIMULATION_AND_TESTING §4."""
@@ -33,6 +40,7 @@ class Scenarios:
         self.name = "patrol"
         self._next: Dict[str, int] = {rid: 0 for rid in world.robots}
         self.orders: Optional[OrderGenerator] = None
+        self._routes: Dict[str, List[Tuple[int, int]]] = self._patrol_routes()
 
     # ------------------------------------------------------- the busy loop
 
@@ -55,9 +63,15 @@ class Scenarios:
         if not self.auto:
             return
         for rid, robot in self.world.robots.items():
+            # Never hijack a robot that is on its way to charge or sitting on a
+            # bay. This loop hands a new waypoint to anything briefly without a
+            # destination, and it sent a robot on 2.7% off across the warehouse
+            # instead of to the charger it had just booked.
+            if robot.charger is not None or robot.status is RobotStatus.CHARGING:
+                continue
             if robot.goal is not None or robot.status is RobotStatus.MOVING:
                 continue
-            stops = PATROL.get(rid)
+            stops = self._routes.get(rid)
             if not stops:
                 continue
             i = self._next.get(rid, 0) % len(stops)
@@ -87,6 +101,7 @@ class Scenarios:
                 limit: Optional[int] = None) -> str:
         """Real work: a stream of orders, robots bidding for each one."""
         self.auto = False
+        self.world.resume_all()
         self.world.reset_counters()
         for robot in self.world.robots.values():
             robot.clear_goal()
@@ -97,16 +112,45 @@ class Scenarios:
     def _patrol(self) -> str:
         self.orders = None
         self.auto = True
+        self.world.resume_all()
         self._next = {rid: 0 for rid in self.world.robots}
+        self._routes = self._patrol_routes()
         self.world.reset_counters()
         for robot in self.world.robots.values():
             robot.clear_goal()
-        return "Free roam: all three robots patrolling. They will meet at (13, 8)."
+        n = len(self.world.robots)
+        return (f"Free roam: all {n} robots patrolling. "
+                "R1, R2 and R3 will meet at (13, 8).")
+
+    def _patrol_routes(self) -> Dict[str, List[Tuple[int, int]]]:
+        """A there-and-back route for every robot on the floor.
+
+        R1, R2 and R3 keep the hand-picked routes that make them collide at
+        (13, 8) -- that is the whole point of the demo. Everyone else used to
+        get nothing and simply stood still, so Free roam with twenty robots
+        moved three of them. Now the rest get their own long routes, picked the
+        same way every time so the demo is repeatable.
+        """
+        routes: Dict[str, List[Tuple[int, int]]] = dict(PATROL)
+        spare = [c for c in self.world.grid.cells_of_kind(CellKind.FLOOR)
+                 if c not in STAGING_CELLS]
+        rng = random.Random(4)
+        rng.shuffle(spare)
+        pool = iter(spare)
+        for rid in self.world.robots:
+            if rid in routes:
+                continue
+            pair = [next(pool, None), next(pool, None)]
+            if None in pair:
+                break
+            routes[rid] = [(c.x, c.y) for c in pair]
+        return routes
 
     def _head_on(self) -> str:
         """08_SIMULATION Scenario 2 -- R1 and R2 driving straight at each other."""
         self.auto = False
         self.orders = None
+        self.world.resume_all()
         self.world.reset_counters()
         self._clear_the_floor()
         self._place("R1", Cell(4, 8), Cell(24, 8))
@@ -118,6 +162,7 @@ class Scenarios:
         """08_SIMULATION Scenario 3 -- three robots aimed at one junction."""
         self.auto = False
         self.orders = None
+        self.world.resume_all()
         self.world.reset_counters()
         self._clear_the_floor()
         # All three start exactly 8 squares from the junction at (13, 8), so
@@ -129,20 +174,64 @@ class Scenarios:
         return "Intersection: all three robots converging on the junction at (13, 8)."
 
     def _stop(self) -> str:
+        """The emergency stop. Everything halts where it is.
+
+        This used to only clear each robot's destination, which stopped almost
+        nothing: a robot carrying a parcel hands itself the same destination
+        back on the very next tick, on purpose, because finishing what you are
+        carrying is meant to be hard to interrupt. So the button said "all
+        robots parked" while half the fleet drove on. It now pulls the actual
+        stop button on every robot, and they stay stopped until you press
+        something else.
+        """
         self.auto = False
         self.orders = None
-        for robot in self.world.robots.values():
-            robot.clear_goal()
-        return "Stopped. All robots parked where they are."
+        n = self.world.halt_all()
+        return f"STOPPED. All {n} robots have halted where they stand."
 
     # -------------------------------------------------------------- helper
 
+    def set_order_rate(self, every: float) -> str:
+        """Change how fast orders arrive, without disturbing anything.
+
+        Twenty robots on a six-second drip stand around with nothing to do --
+        the fleet is not the bottleneck, the order book is. Turning the rate up
+        is what makes a big fleet look busy.
+        """
+        every = max(0.25, min(30.0, float(every)))
+        if self.orders is None:
+            return "No orders running. Press Start orders first."
+        self.orders.every = every
+        # Bring the next one forward if it was already scheduled further out.
+        self.orders._next_at = min(self.orders._next_at,
+                                   self.world.sim_time + every)
+        per_min = 60.0 / every
+        return f"Orders now every {every:g}s (about {per_min:.0f} a minute)."
+
     def _clear_the_floor(self) -> None:
-        """Park every robot well out of the way before staging a scenario, so
-        no staging square is already taken."""
-        spare = [Cell(0, 0), Cell(1, 0), Cell(2, 0), Cell(0, 1), Cell(1, 1)]
-        for i, robot in enumerate(self.world.robots.values()):
-            robot.place(spare[i % len(spare)])
+        """Park every robot on a square of its OWN, well out of the way, before
+        staging a scenario.
+
+        This used to cycle five corner squares with a modulo. That was fine for
+        the three-robot demos it was written for, but with twenty robots on the
+        floor it dropped four robots onto every square: twenty robots became
+        five stacks, and the collision counter went off, correctly. Now each
+        robot gets its own square and we run out of robots before squares.
+        """
+        for robot, cell in zip(self.world.robots.values(), self._parking()):
+            robot.place(cell)
+
+    def _parking(self) -> List[Cell]:
+        """Squares to park spare robots on: never a staging square, and as far
+        as possible from the corridor the demos run down (row 8, column 13),
+        so parked robots do not stand in the way of the demo."""
+        free = [c for c in self.world.grid.cells_of_kind(CellKind.FLOOR)
+                if c not in STAGING_CELLS]
+        # "Far" means far from BOTH the corridor and the crossing aisle, so
+        # take whichever of the two it is nearer to and push that as high as
+        # it will go. Ties break on the coordinates, so the demo is repeatable.
+        free.sort(key=lambda c: (-min(abs(c.y - 8), abs(c.x - 13)), c.x, c.y))
+        return free
 
     def _place(self, robot_id: str, at: Cell, goal: Optional[Cell]) -> None:
         """Drop a robot onto a square to set up a demo.
@@ -193,16 +282,43 @@ class OrderGenerator:
         self.emitted = 0
 
         grid = world.grid
-        # Collect from a square with a shelf next to it -- that is where the
-        # goods are. Deliver to a packing station.
+        # Collect from a square with a SHELF next to it -- that is where the
+        # goods physically are. Deliver to a packing bay.
+        #
+        # This used to ask "is any neighbour not walkable?", and off the edge
+        # of the map counts as not walkable, so the entire outer wall looked
+        # like a shelf. 82 of the 202 collect points were on the border with no
+        # rack anywhere near them: two orders in five said "fetch a box from
+        # the far wall". Asking for an actual shelf leaves 120 real ones.
         self.pickups = [
             c for c in grid.cells_of_kind(CellKind.FLOOR)
-            if any(not grid.is_walkable(n) for n in (
-                Cell(c.x + 1, c.y), Cell(c.x - 1, c.y),
-                Cell(c.x, c.y + 1), Cell(c.x, c.y - 1)))
+            if any(grid.in_bounds(n) and grid.kind(n) is CellKind.SHELF
+                   for n in (Cell(c.x + 1, c.y), Cell(c.x - 1, c.y),
+                             Cell(c.x, c.y + 1), Cell(c.x, c.y - 1)))
         ]
         self.dropoffs = (grid.cells_of_kind(CellKind.DROP)
                          or grid.cells_of_kind(CellKind.PICK))
+
+    # How long one aisle stays the busy one, and what share of orders it takes.
+    HOT_SECONDS = 120.0
+    HOT_SHARE = 0.55
+
+    def hot_zone(self, now: float) -> str:
+        """Which aisle is busy at this moment. Deterministic from the seed."""
+        zones = sorted({s.name[0] for s in self.world.inventory.by_name.values()})
+        if not zones:
+            return ""
+        period = int(now // self.HOT_SECONDS)
+        return zones[(self.seed + period * 3) % len(zones)]
+
+    def _pick_shelf_with_a_pattern(self, now: float):
+        inv = self.world.inventory
+        zone = self.hot_zone(now)
+        if zone and self._rng.random() < self.HOT_SHARE:
+            in_zone = [s for s in inv.by_name.values() if s.name[0] == zone]
+            if in_zone:
+                return self._rng.choice(in_zone)
+        return inv.pick_shelf(self._rng)
 
     def reset(self) -> None:
         self._rng = random.Random(self.seed)
@@ -218,14 +334,32 @@ class OrderGenerator:
         self._next_at = now + self.every
         self.emitted += 1
 
-        pickup = self._rng.choice(self.pickups)
+        # Phase 11. Pick a SHELF, not a square. The shelf knows which floor
+        # square a robot has to stand on to reach it, so the robot still drives
+        # exactly where it always drove -- the name is for the humans.
+        #
+        # Phase 12. Orders are NOT spread evenly over the warehouse, because
+        # real ones are not: a few fast-moving lines account for most picks,
+        # and which lines those are drifts through the day. So most orders come
+        # from whichever aisle is currently hot, and the hot aisle changes every
+        # few minutes.
+        #
+        # This was not put in to flatter the predictor. Before it, orders were
+        # uniform random, the model correctly reported "no idea" for ever, and
+        # pre-positioning could never be anything but noise -- there was nothing
+        # there to learn. It is seeded like everything else, so both sides of
+        # the benchmark still get the identical stream of orders.
+        shelf = self._pick_shelf_with_a_pattern(now)
+        pickup = shelf.face
         dropoff = self._rng.choice(self.dropoffs)
-        product = self._rng.choice(PRODUCTS)
+        quantity = self._rng.choice([1, 1, 1, 2, 2, 3])
         priority = self._rng.choice([5, 5, 5, 6, 7])
+        self.world.inventory.take(shelf.name, quantity)
         # flexible=True: "take it to a packing station", not "to THAT square".
-        task = self.world.announce_task(pickup, dropoff, product, priority,
-                                        flexible=True)
-        return (f"ORDER {task.task_id}: {product} - collect ({pickup.x},{pickup.y}) "
+        task = self.world.announce_task(pickup, dropoff, shelf.product, priority,
+                                        flexible=True, shelf=shelf.name,
+                                        quantity=quantity)
+        return (f"ORDER {task.task_id}: {task.line()} "
                 f"deliver ({dropoff.x},{dropoff.y})")
 
 

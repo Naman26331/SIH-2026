@@ -25,6 +25,7 @@ from .astar import find_path
 from .conflicts import (DEFAULT_CLEARANCE, DEFAULT_HORIZON, Conflict, Plan,
                         build_plan, find_conflicts)
 from .deadlock import STUCK_SECONDS, WaitForGraph, Waiting, choose_victim
+from .demand import DemandModel
 from .fleet_view import FleetView
 from .grid import Cell, CellKind, Grid
 from .messages import (BlockedAisle, ConflictAlert, Heartbeat, IntentUpdate,
@@ -33,8 +34,8 @@ from .messages import (BlockedAisle, ConflictAlert, Heartbeat, IntentUpdate,
 from .obstacles import DEFAULT_TTL, BlockedMap
 from .tasks import (BID_WINDOW, CLAIM_TIMEOUT, Task, TaskBoard, TaskStatus,
                     auction_winner, bid_cost, bid_rank)
-from .priority import (BASE_PRIORITY, effective_priority, next_wait_credit,
-                       quantise, yields_to)
+from .priority import (BASE_PRIORITY, SCALE, effective_priority,
+                       next_wait_credit, quantise, yields_to)
 from .reservations import (DEFAULT_LOOKAHEAD, OCCUPANCY_PRIORITY, Reservation,
                            ReservationTable, avoidance_cost, edge_key, node_key)
 
@@ -106,6 +107,20 @@ class Robot:
     table: Optional[ReservationTable] = None   # its OWN copy of the bookings
     hold: bool = False              # true = do not start onto the next square
     emergency: bool = False         # true = stop NOW, even mid-aisle
+    halted: bool = False            # true = emergency stop pulled by a person
+
+    # --- running out of charge (Phase 13) ---
+    # --- guessing where the work will be (Phase 12) ---
+    demand: DemandModel = field(default_factory=DemandModel)
+    staging: Optional[Cell] = None      # a spot we moved to on a hunch
+    staging_why: str = ""               # in words, for the dashboard
+    prepositions: int = 0
+    _last_preposition_at: float = -99.0
+
+    charger: Optional[Cell] = None    # the bay we have booked and are driving to
+    _charge_slot: Optional[tuple] = None
+    _charge_checked_at: float = -99.0
+    _charge_wanted: bool = False
     blocked_by: Optional[str] = None
     waiting_since: Optional[float] = None
     wait_time: float = 0.0          # total seconds spent held up
@@ -133,6 +148,19 @@ class Robot:
     _saw_rng: object = None         # backoff randomness, seeded per robot
     _still_for: float = 0.0         # seconds spent going nowhere, see stalled_for
     _reversing: bool = False        # backing out of a segment it cannot finish
+
+    # --- carrying on when the radio dies (Phase 14) ---
+    # Robots this one can SEE with its own sensors, as (x, y, cell). Nothing to
+    # do with messages: on real hardware this is the LiDAR, which keeps working
+    # when the network does not.
+    local_contacts: List[tuple] = field(default_factory=list)
+    # square -> when something was first seen sitting on it. Used to tell a
+    # parked robot from a moving one using sensors alone.
+    _contact_since: Dict[tuple, float] = field(default_factory=dict)
+    safe_mode: bool = False
+    last_heard_any: float = -1.0    # when ANY message last arrived
+    _ever_heard: bool = False
+    _resync_pending: bool = False
 
     # --- things that should not be there (Phase 8) ---
     blocked_map: Optional[BlockedMap] = None
@@ -200,6 +228,28 @@ class Robot:
     def clear_goal(self) -> None:
         self.set_goal(None)
 
+    def _forget_hunch(self) -> None:
+        """Drop any pre-positioning guess. A guess is never worth defending."""
+        self.staging = None
+        self.staging_why = ""
+
+    def halt(self) -> None:
+        """Emergency stop, pulled by a person. The robot stops where it is.
+
+        This is not the same as clearing its destination. Clearing the
+        destination only says "forget where you were going" -- a robot that is
+        carrying a parcel gives itself the same destination back on the very
+        next tick, because finishing what you are carrying is deliberately
+        hard to interrupt. An emergency stop is the button on the side of a
+        real robot: it stops, and it stays stopped until somebody releases it.
+        """
+        self.halted = True
+        self._forget_hunch()
+
+    def resume(self) -> None:
+        """Release the emergency stop and let it get on with things again."""
+        self.halted = False
+
     def place(self, cell: Cell) -> None:
         """Put the robot down on a square immediately, forgetting its route.
 
@@ -223,6 +273,20 @@ class Robot:
         It only changes the robot's plan and status. It never moves anything.
         """
         if self.status is RobotStatus.FAILED:
+            return
+
+        # Sitting on a charger. Deciding runs AFTER the battery pass in a tick,
+        # so without this it would see "no destination", call the robot idle,
+        # and undo the charging status every single tick -- which it did, and
+        # ten robots sat on four chargers draining to nothing.
+        if self.status is RobotStatus.CHARGING:
+            return
+
+        # Stopped by a person. Keep the route on screen so you can see what it
+        # was in the middle of, but decide nothing and go nowhere.
+        if self.halted:
+            self.status = (RobotStatus.WAITING if self.path or self.goal
+                           else RobotStatus.IDLE)
             return
 
         # Nothing to do.
@@ -287,6 +351,16 @@ class Robot:
         ONLY the grid simulator calls this. On a real robot Nav2 turns the
         wheels and update_pose() is used instead.
         """
+        if self.halted:
+            # The stop button is out. Wheels off, even part way down an aisle.
+            self._drain_battery(dt, moving=False)
+            self._still_for += dt
+            return
+
+        if self.status is RobotStatus.CHARGING:
+            self.battery = min(100.0, self.battery + self.CHARGE_RATE * dt)
+            self._still_for += dt
+            return
         before = (self.cell, self.x, self.y)
         self._advance(dt)
         if self.goal is None or before != (self.cell, self.x, self.y):
@@ -301,7 +375,7 @@ class Robot:
             # without it two robots part way into the same square from opposite
             # sides are wedged there for ever -- neither can go on, and neither
             # can get out of the way.
-            self._progress -= self.speed * dt
+            self._progress -= self.travel_speed() * dt
             if self._progress <= 0.0:
                 self._progress = 0.0
                 self._reversing = False
@@ -337,13 +411,20 @@ class Robot:
         if self.status not in (RobotStatus.MOVING, RobotStatus.WAITING,
                                RobotStatus.REROUTING,
                                RobotStatus.YIELDING) or not self.path:
-            self.x = float(self.cell.x)
-            self.y = float(self.cell.y)
-            self._progress = 0.0
+            # Stand still -- but a robot that is PART WAY along a step is
+            # physically between two squares, and must stay where its wheels
+            # actually are. Snapping it back onto the square behind it is a
+            # teleport: it jumps backwards straight through every safety check,
+            # which is how all three collisions in this project's history
+            # happened. It cost 0.375 of a square when a robot stood down from
+            # a charging bay mid-aisle and was marked idle on the spot.
+            if self._progress == 0.0:
+                self.x = float(self.cell.x)
+                self.y = float(self.cell.y)
             self._drain_battery(dt, moving=False)
             return
 
-        self._progress += self.speed * dt
+        self._progress += self.travel_speed() * dt
 
         # Cross as many whole squares as this tick allows. A robot always
         # finishes the segment it started -- it stops cleanly ON a square,
@@ -411,10 +492,20 @@ class Robot:
         which squares it is about to occupy and WHEN -- which is what lets
         another robot see a crash coming instead of reacting to one.
         """
-        if not self.path or self.speed <= 0:
+        if not self.path or self.travel_speed() <= 0:
             return []
-        first = (1.0 - self._progress) / self.speed     # time to the next square
-        return [first + i / self.speed for i in range(len(self.path))]
+        speed = self.travel_speed()
+        first = (1.0 - self._progress) / speed          # time to the next square
+        return [first + i / speed for i in range(len(self.path))]
+
+    # In safe mode a robot runs at half speed. 03_ROBOT_AND_ROS2 section 9:
+    # "NETWORK OFF -> reduce speed -> use local obstacle avoidance". Less
+    # information about the world means more caution, not the same caution.
+    SAFE_MODE_SPEED_FACTOR = 0.5
+
+    def travel_speed(self) -> float:
+        """How fast it is allowed to drive right now."""
+        return self.speed * (self.SAFE_MODE_SPEED_FACTOR if self.safe_mode else 1.0)
 
     def current_velocity(self) -> float:
         """How fast it is ACTUALLY going, right now.
@@ -425,12 +516,12 @@ class Robot:
         squares it was not moving into. Two stopped robots would then block each
         other forever over a square neither was going to enter.
         """
-        if self.hold or not self.path:
+        if self.halted or self.hold or not self.path:
             return 0.0
         if self.status in (RobotStatus.FAILED, RobotStatus.IDLE,
                            RobotStatus.WAITING, RobotStatus.CHARGING):
             return 0.0
-        return self.speed
+        return self.travel_speed()
 
     def build_intent(self, now: float) -> IntentUpdate:
         etas = self.node_etas()
@@ -461,9 +552,15 @@ class Robot:
             self._ingest_blocked_aisle(message, now)
             self._ingest_task_news(message, now)
             self.messages_heard += 1
+            # Anything at all arriving means the radio is alive.
+            self.last_heard_any = now
+            self._ever_heard = True
 
         if self.status is RobotStatus.FAILED:
             return
+
+        if self._resync_pending:
+            self._resync(bus, now)
 
         # 2. Heartbeat -- "I am alive", on a fixed drumbeat.
         if now >= self._next_heartbeat:
@@ -713,6 +810,16 @@ class Robot:
 
     # --------------------------------------- booking squares (Phase 5)
 
+    # --- Phase 13: charge ---
+    DRAIN_MOVING = 0.35               # percent per second while driving
+    DRAIN_IDLE = 0.05                 # percent per second just sitting there
+    CHARGE_RATE = 4.0                 # percent per second on a charger
+    CHARGE_UNTIL = 95.0               # top up to here, then back to work
+    BATTERY_RESERVE = 15.0            # must still have this on reaching a bay
+    BATTERY_MINIMUM = 6.0             # a robot already carrying is more stubborn
+    BATTERY_BAND = 5.0                # agreement bucket, see charge_urgency
+    CHARGE_RECHECK = 2.0              # seconds between re-doing the sums
+
     LOOKAHEAD = DEFAULT_LOOKAHEAD     # how many squares ahead to book
     CLEARANCE = 0.35                  # a little clear time either side
     SAFE_GAP = 0.9                    # squares of clear space needed ahead
@@ -743,7 +850,8 @@ class Robot:
         own half the warehouse while everybody else sat still.
         """
         wanted: Dict[tuple, tuple] = {}
-        dwell = (1.0 / self.speed) if self.speed > 0 else 1.0
+        speed = self.travel_speed()
+        dwell = (1.0 / speed) if speed > 0 else 1.0
         etas = self.node_etas()
 
         # The square it is physically standing on, at OCCUPANCY_PRIORITY.
@@ -776,13 +884,21 @@ class Robot:
             edge_start = now + (etas[i - 1] if i > 0 else 0.0) - self.CLEARANCE
             wanted[edge_key(prev, node)] = (edge_start, now + etas[i] + self.CLEARANCE,
                                             self.priority)
+
+        # Phase 13: the charging bay we have booked, held for the whole trip
+        # plus the top-up. Same table, same rules, same broadcast as any other
+        # square -- a bay is just a square somebody wants.
+        if self.charger is not None and self._charge_slot is not None:
+            start, end = self._charge_slot
+            wanted[node_key(self.charger)] = (start, end, self.charge_urgency())
         return wanted
 
     def reserve_ahead(self, bus, now: float) -> None:
         """Claim what we need, give back what we no longer do, tell everyone."""
         if self.status is RobotStatus.FAILED:
             # A broken robot must not keep squares booked, or the rest of the
-            # fleet drives around holes that nobody is in.
+            # fleet drives around holes that nobody is in. release_all() hands
+            # its charging bay back too.
             # 03_ROBOT_AND_ROS2 section 5: release its future reservations.
             self.release_all(bus, now)
             return
@@ -839,6 +955,11 @@ class Robot:
         self._asked_at.clear()
         self._make_way_for = None
         self._pending_ask = None
+        self._contact_since.clear()
+        self.local_contacts = []
+        self.safe_mode = False
+        self.last_heard_any = -1.0
+        self._ever_heard = False
         self.blocked_map = BlockedMap()
         self._pending_blocks.clear()
         self.board = TaskBoard()
@@ -857,6 +978,13 @@ class Robot:
         self.hold = False
         self.blocked_by = None
         self.waiting_since = None
+        # Its charging bay goes back the moment it fails, not on the next tick.
+        # One of four bays lost for the rest of a run is a quarter of the
+        # fleet's ability to recharge.
+        self.charger = None
+        self._charge_slot = None
+        self._charge_wanted = False
+        self._charge_checked_at = -99.0
 
     def _broadcast_reservation(self, bus, now: float, action: str, res: Reservation) -> None:
         if bus is None:
@@ -935,16 +1063,16 @@ class Robot:
         a different moment and meet in the middle. Measuring the real gap
         closes that hole.
         """
-        for note in self.fleet.fresh(now):
+        for contact in self._all_contacts(now):
             # Where it was when it last spoke, AND where it has probably got to
             # since. Checking only the first was how a robot already part way
             # into a square looked like it was still safely outside it.
-            here = (note.x, note.y)
-            soon = note.position_at(now)
+            here = (contact["x"], contact["y"])
+            soon = contact["soon"]
             for px, py in (here, soon):
                 gap_x, gap_y = px - nxt.x, py - nxt.y
                 if gap_x * gap_x + gap_y * gap_y < self.SAFE_GAP * self.SAFE_GAP:
-                    self.blocked_by = note.robot_id
+                    self.blocked_by = contact["id"]
                     self._set_hold(True, now, dt, emergency=True)
                     return True
 
@@ -964,25 +1092,94 @@ class Robot:
             # ...unless it is parked, and we know that recently. Parked robots
             # cannot move into my square, and yielding to one forever would be
             # a deadlock of my own making.
-            pose_fresh = (now - note.last_pose) <= self.POSE_TRUST
-            if pose_fresh and note.velocity <= 0.01:
+            if contact["known_still"]:
                 continue
 
-            intent_fresh = ((now - note.last_intent) <= self.INTENT_TRUST
-                            and note.next_cell is not None)
-            if intent_fresh and note.next_cell != (nxt.x, nxt.y):
+            if (contact["next_cell"] is not None
+                    and contact["next_cell"] != (nxt.x, nxt.y)):
                 continue                       # we know it is going elsewhere
 
             # Settled WITHOUT the booking table, because the table is exactly
-            # what the two of them can disagree about. yields_to() always gives
-            # the two robots opposite answers, so it can never let both through,
-            # and can never stop both either.
-            if yields_to(self.priority, self.robot_id, note.priority, note.robot_id):
-                self.blocked_by = note.robot_id
+            # what the two of them can disagree about. The rule always gives the
+            # two robots opposite answers, so it can never let both through, and
+            # can never stop both either.
+            if self._yields_to_contact(contact, nxt):
+                self.blocked_by = contact["id"]
                 self._set_hold(True, now, dt, emergency=True)
                 return True
 
         return False
+
+    def _all_contacts(self, now: float) -> List[Dict[str, object]]:
+        """Every other robot this one knows about, however it found out.
+
+        Two sources, and the difference is the whole point of this phase:
+
+          RADIO   -- rich (name, priority, where it says it is going), but it
+                     stops dead the moment the network does.
+          SENSORS -- only a shape at a position, but it never stops working.
+
+        Before Phase 14 the "local safety reflex" read the radio and nothing
+        else. Cut the network and every robot believed it was alone in the
+        warehouse. The claim that safety did not depend on the network was
+        simply not true. It is now.
+        """
+        contacts: List[Dict[str, object]] = []
+        by_radio = set()
+
+        for note in self.fleet.fresh(now):
+            pose_fresh = (now - note.last_pose) <= self.POSE_TRUST
+            intent_fresh = ((now - note.last_intent) <= self.INTENT_TRUST
+                            and note.next_cell is not None)
+            contacts.append({
+                "id": note.robot_id,
+                "x": note.x, "y": note.y, "soon": note.position_at(now),
+                "cell": Cell(note.cell[0], note.cell[1]),
+                "priority": note.priority,
+                "known_still": pose_fresh and note.velocity <= 0.01,
+                "next_cell": note.next_cell if intent_fresh else None,
+                "by_radio": True,
+            })
+            by_radio.add((note.cell[0], note.cell[1]))
+
+        # Anything the sensors saw that the radio did not already cover.
+        for cx, cy, cell in self.local_contacts:
+            key = (cell.x, cell.y)
+            if key in by_radio:
+                continue
+            since = self._contact_since.get(key, now)
+            contacts.append({
+                "id": "unknown", "x": cx, "y": cy, "soon": (cx, cy),
+                "cell": cell, "priority": None,
+                "known_still": (now - since) >= self.CONTACT_STILL_AFTER,
+                "next_cell": None, "by_radio": False,
+            })
+
+        return contacts
+
+    def _yields_to_contact(self, contact: Dict[str, object], nxt: Cell) -> bool:
+        """Do I give way to this one?
+
+        If we are talking: the usual rule -- priority, then the lower name.
+        Both robots compute it identically, so it can never say "both go".
+
+        If the radio is down: a sensor sees a shape, not a name. So fall back to
+        something both can work out from POSITION alone -- whoever is further
+        from the contested square gives way, and if that is level, the one
+        further down-and-right gives way. Cruder and slower, but both reach the
+        same answer with nothing said between them, and it cannot stop both,
+        because it is never true for both at once.
+        """
+        if contact["by_radio"] and contact["priority"] is not None:
+            return yields_to(self.priority, self.robot_id,
+                             int(contact["priority"]), str(contact["id"]))
+
+        theirs = contact["cell"]
+        my_gap = abs(self.cell.x - nxt.x) + abs(self.cell.y - nxt.y)
+        their_gap = abs(theirs.x - nxt.x) + abs(theirs.y - nxt.y)
+        if my_gap != their_gap:
+            return my_gap > their_gap
+        return (self.cell.y, self.cell.x) > (theirs.y, theirs.x)
 
     def _set_hold(self, hold: bool, now: float, dt: float,
                   emergency: bool = False) -> None:
@@ -1103,9 +1300,10 @@ class Robot:
 
         self._reroute_cooldown_until = now + self.REROUTE_COOLDOWN
 
-        # Squares that physically have a robot standing on them right now.
-        # Those are near-impassable, not merely expensive.
-        occupied = [Cell(n.cell[0], n.cell[1]) for n in self.fleet.fresh(now)]
+        # Squares that physically have a robot standing on them right now --
+        # heard OR seen. In a blackout the radio half is empty and the sensor
+        # half is all there is.
+        occupied = self.known_occupied(now)
 
         # If it is already part way along a segment it is COMMITTED to reaching
         # that square -- a real robot cannot jump back onto the one behind it.
@@ -1155,8 +1353,13 @@ class Robot:
             return False
 
         extra = len(new_path) - len(self.path)
+        # "unknown" is what a robot spotted on sensors alone is called
+        # internally. Do not print that at a person.
+        who = self.blocked_by
+        if who in (None, "unknown"):
+            who = "a robot it can only see"
         self.last_decision = (
-            f"{self.robot_id} gave way to {self.blocked_by or 'traffic'} - "
+            f"{self.robot_id} gave way to {who} - "
             f"going around ({extra:+d} squares)"
         )
         self.path = new_path
@@ -1183,9 +1386,11 @@ class Robot:
         Real warehouses do not let robots idle in the pick face either. So an
         idle robot steps off onto ordinary floor and waits there.
         """
+        if self.charger is not None or self.status is RobotStatus.CHARGING:
+            return None               # it is there on purpose
         if self.task is not None or self.goal is not None:
             return None
-        if self.status not in (RobotStatus.IDLE, RobotStatus.CHARGING):
+        if self.status is not RobotStatus.IDLE:
             return None
         if grid.kind(self.cell) is CellKind.FLOOR:
             return None                       # already out of the way
@@ -1197,9 +1402,175 @@ class Robot:
         return (f"{self.robot_id} cleared the station at "
                 f"({self.cell.x}, {self.cell.y}) -> ({spot.x}, {spot.y})")
 
+    # ------------------------------------ Phase 12: standing somewhere useful
+
+    PREPOSITION_EVERY = 4.0       # seconds between having the thought
+    PREPOSITION_MIN_GAIN = 4.0    # squares closer it must make us, to be worth it
+    HUNCH_PATIENCE = 8.0          # stuck this long on a guess, drop the guess
+    HUNCH_SPREAD = 24             # different waiting squares to scatter over
+
+    def consider_prepositioning(self, grid: Grid, now: float,
+                                inventory=None) -> Optional[str]:
+        """Nothing to do? Then wait somewhere the next order is likely to be.
+
+        Everything about this is optional and reversible on purpose:
+
+          * only a robot with no job, no charging trip and nowhere to be even
+            considers it;
+          * it moves to ordinary floor, never onto a shelf face, a packing bay
+            or a charger, so a robot guessing wrong is never in anybody's way;
+          * the moment a real job turns up, the job wins -- work_on_tasks sets
+            a goal and the hunch is forgotten;
+          * if the model has no opinion, or the move would not gain much, it
+            does nothing at all.
+
+        So a wrong guess costs one short empty drive. That is the whole risk.
+        """
+        if (self.task is not None or self.charger is not None
+                or self.halted or self.status is RobotStatus.FAILED
+                or self.safe_mode
+                or self.status is RobotStatus.CHARGING):
+            # Anything real to do beats a hunch, so forget the hunch. Clearing
+            # it here as well as when it is taken matters: a robot that booked
+            # a charger while parked on a guess kept showing the guess, and the
+            # dashboard said it was sightseeing on 10% battery.
+            #
+            # safe_mode is in that list because out of touch means no new work
+            # is reaching anybody, so there is nothing to get ahead of -- and
+            # because a robot that cannot hear the others has no idea where
+            # they are going. Guessing is a luxury for when the radio works.
+            self.staging = None
+            self.staging_why = ""
+            return None
+        if self.staging is not None and self._still_for > self.HUNCH_PATIENCE:
+            # Been trying to reach it and getting nowhere. A guess is never
+            # worth defending: drop it and stand where we are. Without this,
+            # robots that wanted the same spot sat holding for each other
+            # indefinitely, because nothing ever told them to stop wanting it.
+            spot = self.staging
+            self._forget_hunch()
+            self.set_goal(None)
+            return (f"{self.robot_id} gave up waiting for ({spot.x}, {spot.y}) "
+                    f"- not worth it for a guess")
+
+        if self.goal is not None or self.path:
+            return None                       # already going somewhere
+        if inventory is None or self._progress > 0.0:
+            return None
+        if now - self._last_preposition_at < self.PREPOSITION_EVERY:
+            return None
+        self._last_preposition_at = now
+
+        pred = self.demand.predict(now)
+        if pred is None:
+            self.staging = None
+            self.staging_why = ""
+            return None                       # honestly no idea; stay put
+
+        # Do not all pile into the same aisle. Robots ALREADY closer to it than
+        # we are have it covered -- a robot counts the others from its own view
+        # of the fleet, so this needs no agreement and no messages of its own.
+        spot = self._staging_spot(grid, now, pred.zone, inventory)
+        if spot is None:
+            return None
+
+        here = self._distance_to(grid, self.cell, now)
+        mine = self._distance_to(grid, spot, now, start=self.cell)
+        if mine is None:
+            return None
+        nearer = sum(1 for n in self.fleet.fresh(now)
+                     if abs(n.x - spot.x) + abs(n.y - spot.y) < mine)
+        if nearer >= 2:
+            return None                       # two robots are closer; leave it
+
+        gain = self._zone_gain(grid, now, pred.zone, spot, inventory)
+        if gain is None or gain < self.PREPOSITION_MIN_GAIN:
+            return None                       # not worth the drive
+
+        self.staging = spot
+        shelf_name = self._nearest_shelf_name(spot, inventory)
+        self.staging_why = (f"pre-positioned near {shelf_name}, busy zone "
+                            f"({pred.reason})")
+        self.prepositions += 1
+        self.set_goal(spot)
+        return f"{self.robot_id} {self.staging_why}"
+
+    def _distance_to(self, grid: Grid, cell: Cell, now: float,
+                     start: Optional[Cell] = None) -> Optional[float]:
+        leg = find_path(grid, start or self.cell, cell,
+                        blocked=self.blocked_map.cells(now))
+        return None if leg is None else float(len(leg) - 1)
+
+    def _nearest_shelf_name(self, spot: Cell, inventory) -> str:
+        """The rack this spot is waiting next to, for the explanation."""
+        best, best_d = "", 1e9
+        for shelf in inventory.by_name.values():
+            d = abs(shelf.face.x - spot.x) + abs(shelf.face.y - spot.y)
+            if d < best_d:
+                best, best_d = shelf.name, d
+        return best
+
+    def _staging_spot(self, grid: Grid, now: float, zone: str,
+                      inventory) -> Optional[Cell]:
+        """An out-of-the-way square to wait on, in the middle of a busy aisle.
+
+        The middle, because we do not know WHICH rack in the aisle the next
+        order will be for, and standing in the middle is the best answer to
+        that question. Never on a shelf face -- that is where a picking robot
+        has to stand.
+        """
+        faces = [s.face for s in inventory.by_name.values() if s.name[0] == zone]
+        if not faces:
+            return None
+        mid_x = sum(f.x for f in faces) / len(faces)
+        mid_y = sum(f.y for f in faces) / len(faces)
+        # EVERY shelf's face, not just this aisle's. A spot in the middle of
+        # aisle B is easily the picking square for a rack in A or C, and a
+        # robot waiting on a hunch must never be standing where a robot with an
+        # actual job has to stand.
+        busy = {sh.face for sh in inventory.by_name.values()}
+
+        # The candidate list is built from the MAP ALONE -- no occupancy, no
+        # blockages, nothing that one robot might know and another might not.
+        # That matters: every robot must compute the identical list, or the
+        # same index means a different square to each of them and they collide
+        # on a choice anyway. It did exactly that.
+        near = sorted(
+            (c for c in grid.cells_of_kind(CellKind.FLOOR) if c not in busy),
+            key=lambda c: ((c.x - mid_x) ** 2 + (c.y - mid_y) ** 2, c.x, c.y)
+        )[:self.HUNCH_SPREAD]
+        if not near:
+            return None
+
+        # Then take the slot our own NAME points at. Deliberately not "is
+        # anybody else already going there": that reads the radio, and with the
+        # radio cut every robot believes it is alone -- four of them drove to
+        # the very same square and sat holding for each other for two minutes.
+        # A name needs no messages and cannot go stale, which is the same
+        # reasoning that decides who gives way.
+        digits = "".join(ch for ch in self.robot_id if ch.isdigit())
+        mine = (int(digits) - 1) if digits else 0
+        spot = near[mine % len(near)]
+
+        # Only now look at what we personally know, and simply decline if our
+        # square is not free. Declining is always safe; queueing for it is not.
+        if spot in self.known_occupied(now) or spot in self.blocked_map.cells(now):
+            return None
+        return spot
+
+    def _zone_gain(self, grid: Grid, now: float, zone: str, spot: Cell,
+                   inventory) -> Optional[float]:
+        """How many squares closer to that aisle the move would leave us."""
+        faces = [s.face for s in inventory.by_name.values() if s.name[0] == zone]
+        if not faces:
+            return None
+        def typical(c: Cell) -> float:
+            return sum(abs(f.x - c.x) + abs(f.y - c.y) for f in faces) / len(faces)
+        return typical(self.cell) - typical(spot)
+
     def _nearest_parking(self, grid: Grid, now: float) -> Optional[Cell]:
         """Closest ordinary floor square with nobody on it."""
-        taken = {Cell(n.cell[0], n.cell[1]) for n in self.fleet.fresh(now)}
+        taken = set(self.known_occupied(now))
         blocked = self.blocked_map.cells(now)
         seen = {self.cell}
         queue = [self.cell]
@@ -1221,12 +1592,19 @@ class Robot:
     def _ingest_task_news(self, message, now: float) -> None:
         """Keep our own copy of the job board up to date."""
         if isinstance(message, TaskAnnounce):
+            # Phase 12: every order that goes past teaches us something about
+            # where the work comes from. Each robot keeps its own model, built
+            # from the same announcements everybody hears -- no server holds it.
+            if message.shelf:
+                self.demand.record(message.shelf[0], now)
+
             task = self.board.get(message.task_id)
             if task is None:
                 self.board.add(Task(
                     task_id=message.task_id,
                     pickup=Cell(*message.pickup), dropoff=Cell(*message.dropoff),
                     product=message.product, priority=message.priority,
+                    shelf=message.shelf, quantity=message.quantity,
                     created_at=now, announced_at=now,
                     status=TaskStatus.ANNOUNCED, flexible=message.flexible,
                 ))
@@ -1283,21 +1661,49 @@ class Robot:
                 self._drop_task()
             return notes
 
+        # Stopped by a person. It keeps the job it is holding -- it has not
+        # failed, it is just standing still -- but it takes no new work and,
+        # crucially, does not hand itself its destination back.
+        if self.halted:
+            return notes
+
+        # On the way to a charging bay, or sitting on one. It keeps a parcel it
+        # is already carrying and picks the delivery back up afterwards, but it
+        # must not re-aim itself at the drop-off while it is going to charge.
+        if self.charger is not None or self.status is RobotStatus.CHARGING:
+            return notes
+
         # A peer has gone quiet while holding a job. Put it back up for
         # auction -- 06_TASK_ALLOCATION section 4. Whoever notices first does
         # it; a repeat is harmless because the job keeps its id.
-        for note in self.fleet.stale(now):
-            for task in self.board.held_by(note.robot_id):
-                task.release()
-                notes.append(f"{note.robot_id} has gone quiet - "
-                             f"{task.task_id} back up for auction")
-                if bus is not None:
-                    self._publish(bus, TaskClaim(
-                        robot_id=note.robot_id, timestamp=now, seq=self.seq,
-                        task_id=task.task_id, action="RELEASE"))
+        #
+        # BUT only while our own radio is clearly working. If we cannot hear
+        # ANYBODY, the one that has gone quiet is probably us, and "everyone
+        # else has failed, so I will take all their jobs" is exactly the wrong
+        # conclusion. Three robots reached it at once, took the same parcel to
+        # the same square, and wedged each other there.
+        if self.link_quiet_for(now) <= self.LINK_TRUSTED_WITHIN:
+            for note in self.fleet.stale(now):
+                for task in self.board.held_by(note.robot_id):
+                    task.release()
+                    notes.append(f"{note.robot_id} has gone quiet - "
+                                 f"{task.task_id} back up for auction")
+                    if bus is not None:
+                        self._publish(bus, TaskClaim(
+                            robot_id=note.robot_id, timestamp=now, seq=self.seq,
+                            task_id=task.task_id, action="RELEASE"))
 
         if self.task is not None:
+            # Finish what we are already carrying, network or no network.
             notes += self._progress_task(grid, bus, now)
+            return notes
+
+        if self.safe_mode:
+            # No radio means no auction: nobody would hear the bid, and nobody
+            # would hear the claim. Taking a job anyway is how three robots
+            # ended up carrying the same parcel to the same square and wedging
+            # each other there. So a robot out of touch finishes what it has
+            # and then waits. There is genuinely no new work reaching it.
             return notes
 
         notes += self._bid_and_claim(grid, bus, now)
@@ -1405,6 +1811,14 @@ class Robot:
         leg = find_path(grid, task.pickup, task.dropoff, blocked=blocked)
         if leg is None:
             return None
+        # Phase 13. The question asked in the right place: at the auction.
+        # A robot that cannot finish this job AND still reach a charger simply
+        # does not bid, so the job goes to somebody who can rather than being
+        # abandoned half done.
+        if not self.can_finish_and_still_reach_a_charger(
+                grid, now, [task.pickup, task.dropoff]):
+            return None
+
         congestion = float(len(blocked)) + len(self.fleet.fresh(now)) * 0.5
         return bid_cost(
             distance_to_pickup=len(to_pickup) - 1,
@@ -1416,6 +1830,9 @@ class Robot:
         )
 
     def _take_task(self, task: Task, now: float) -> None:
+        # Real work beats a guess, always and immediately.
+        self.staging = None
+        self.staging_why = ""
         task.assigned_robot = self.robot_id
         task.status = TaskStatus.ASSIGNED
         task.claimed_at = now
@@ -1480,6 +1897,113 @@ class Robot:
 
         return notes
 
+    # ------------------------- carrying on without a radio (Phase 14)
+
+    # Heard nothing at all for this long, and we know we are not alone:
+    # assume the network has gone.
+    NETWORK_TIMEOUT = 3.0
+
+    # A shape that has not left its square for this long is parked, not
+    # about to move.
+    CONTACT_STILL_AFTER = 1.0
+
+    # We only trust our own judgement about other robots having failed while we
+    # have heard SOMETHING this recently. Otherwise the silence is ours.
+    LINK_TRUSTED_WITHIN = 1.5
+
+    def sense_robots(self, contacts: Iterable[tuple], now: float) -> None:
+        """What this robot can SEE of the others. No messages involved.
+
+        On real hardware this is the laser: another robot reflects a beam
+        exactly like a dropped pallet does. The simulator plays the part of the
+        scanner and hands over only what is physically within range.
+
+        This is the difference between claiming a local safety reflex and
+        having one. Until now the "reflex" read the notebook of things heard on
+        the RADIO -- so cutting the network made every robot believe it was
+        alone in the warehouse, and they would have driven straight through
+        each other. Sensors do not care whether the network is up.
+        """
+        self.local_contacts = list(contacts)
+
+        # A sensor sees a shape, not a status. Without this, a robot that has
+        # simply parked looks exactly like one about to pull out in front of
+        # us, so everybody yields to it -- for ever. Watching whether a shape
+        # STAYS on the same square tells us the difference, and needs no
+        # messages. A moving robot crosses a square in well under a second.
+        here = {(c.x, c.y) for (_, _, c) in self.local_contacts}
+        for key in list(self._contact_since):
+            if key not in here:
+                del self._contact_since[key]
+        for key in here:
+            self._contact_since.setdefault(key, now)
+
+    def known_occupied(self, now: float) -> List[Cell]:
+        """Squares that have a robot on them, from BOTH sources.
+
+        Everything that needs to route around other robots must use this, not
+        just the radio. Getting that wrong meant a robot in a blackout would
+        replan straight through the robot blocking it, conclude the new route
+        was the same as the old one, and wait for ever.
+        """
+        cells = {Cell(n.cell[0], n.cell[1]) for n in self.fleet.fresh(now)}
+        cells.update(cell for (_, _, cell) in self.local_contacts)
+        return list(cells)
+
+    def link_quiet_for(self, now: float) -> float:
+        """Seconds since ANY message arrived from anybody."""
+        if self.last_heard_any < 0:
+            return 0.0
+        return max(0.0, now - self.last_heard_any)
+
+    def update_link_health(self, now: float) -> Optional[str]:
+        """Decide whether we are on our own, and say so when it changes.
+
+        01_PRODUCT_AND_SYSTEM_DESIGN section 7:
+            Normal network      -> decentralised coordination
+            Network degraded    -> local coordination / reduced speed
+            Network unavailable -> local safety mode
+            Network restored    -> state synchronisation
+        """
+        lonely = (self._ever_heard
+                  and self.link_quiet_for(now) > self.NETWORK_TIMEOUT)
+
+        if lonely and not self.safe_mode:
+            self.safe_mode = True
+            if self.status is not RobotStatus.FAILED:
+                self.status = RobotStatus.SAFE_MODE
+            return (f"{self.robot_id} has lost the network - SAFE MODE, "
+                    f"half speed, finishing the job it is holding")
+
+        if not lonely and self.safe_mode:
+            self.safe_mode = False
+            self._resync_pending = True
+            if self.status is RobotStatus.SAFE_MODE:
+                self.status = RobotStatus.MOVING if self.path else RobotStatus.IDLE
+            return f"{self.robot_id} is back on the network - resyncing"
+
+        return None
+
+    def _resync(self, bus, now: float) -> None:
+        """Tell everyone everything again, after being out of touch.
+
+        03_ROBOT_AND_ROS2 section 9: SYNC STATE, SYNC TASK, SYNC RESERVATIONS,
+        RESUME. Nothing clever -- the periodic broadcasts are simply forced to
+        go out at once instead of waiting for their next turn.
+        """
+        self._resync_pending = False
+        self._next_heartbeat = 0.0
+        self._next_pose = 0.0
+        self._last_intent_key = None
+        self._last_wait_report = None
+        for res in list(self._claimed.values()):
+            self._broadcast_reservation(bus, now, "CLAIM", res)
+        if self.task is not None and bus is not None:
+            self._publish(bus, TaskClaim(
+                robot_id=self.robot_id, timestamp=now, seq=self.seq,
+                task_id=self.task.task_id, action="CLAIM",
+                cost=self._my_bids.get(self.task.task_id, 0.0)))
+
     # -------------------------- things in the way (Phase 8)
 
     def _ingest_blocked_aisle(self, message, now: float) -> None:
@@ -1535,6 +2059,13 @@ class Robot:
     # ------------------------------ breaking a hopeless jam (Phase 7)
 
     ASK_COOLDOWN = 3.0          # do not pester the same robot every tick
+
+    # Two robots each blocked by the other cannot possibly clear on their own,
+    # so there is nothing to be gained by waiting the full STUCK_SECONDS to
+    # find out. Waiting anyway is what made a pair sit nose to nose for four
+    # seconds, which to anyone watching looks like the system has frozen.
+    # Longer chains still get the full patience -- those often do clear.
+    MUTUAL_STUCK_SECONDS = 1.0
     ASIDE_PAUSE = 2.5           # stay out of the way this long before resuming
 
     def _ingest_jam_news(self, message, now: float) -> None:
@@ -1569,9 +2100,17 @@ class Robot:
             has to give up, chosen so that everyone picks the same one.
         """
         stuck = max(self.waited_for(now), self.stalled_for(now))
-        if self.blocked_by is None or stuck < STUCK_SECONDS:
+        if self.blocked_by is None:
             return None
         blocker = self.blocked_by
+
+        # Is this a straight two-robot standoff -- me behind them, them behind
+        # me? That can never sort itself out, so act on it quickly.
+        theirs = self.waits.blocker_of(blocker)
+        head_on = theirs == self.robot_id
+        patience = self.MUTUAL_STUCK_SECONDS if head_on else STUCK_SECONDS
+        if stuck < patience:
+            return None
 
         last_asked = self._asked_at.get(blocker)
         if last_asked is not None and now - last_asked < self.ASK_COOLDOWN:
@@ -1668,8 +2207,7 @@ class Robot:
         job would just swap one problem for another.
         """
         blocked = set(avoid)
-        for note in self.fleet.fresh(now):
-            blocked.add(Cell(note.cell[0], note.cell[1]))
+        blocked.update(self.known_occupied(now))
         if self.path:
             blocked.add(self.path[0])
 
@@ -1714,8 +2252,224 @@ class Robot:
     # ------------------------------------------------------------- internals
 
     def _drain_battery(self, dt: float, moving: bool) -> None:
-        rate = 0.35 if moving else 0.05   # percent per second
+        rate = self.DRAIN_MOVING if moving else self.DRAIN_IDLE
         self.battery = max(0.0, self.battery - rate * dt)
+
+    # --------------------------------------------------- Phase 13: charging
+
+    def percent_per_square(self) -> float:
+        """What one square of driving costs in charge."""
+        return self.DRAIN_MOVING / max(self.speed, 0.1)
+
+    def charge_urgency(self) -> int:
+        """How badly we want a charger, as a booking priority.
+
+        The emptier the robot, the higher. Rounded into whole 5% bands on
+        purpose: every robot holds a slightly stale copy of everyone else's
+        battery, and a comparison that turns on a fraction of a percent lets
+        two robots each decide they won the bay. Robots must differ by a clear
+        band before one outranks the other, and below that the lower robot ID
+        decides -- a name cannot go stale. Same rule as giving way.
+        """
+        empty = max(0.0, 100.0 - self.battery)
+        return int(empty / self.BATTERY_BAND) * SCALE
+
+    def _walk(self, grid: Grid, blocked, start: Cell, stops) -> Optional[float]:
+        """Squares driven going from start through each stop in turn."""
+        total, here = 0.0, start
+        for stop in stops:
+            leg = find_path(grid, here, stop, blocked=blocked)
+            if leg is None:
+                return None
+            total += len(leg) - 1
+            here = stop
+        return total
+
+    def _nearest_charger(self, grid: Grid, blocked, start: Cell):
+        """(squares, cell) of the closest charging bay, ignoring who booked it."""
+        best = None
+        for bay in grid.cells_of_kind(CellKind.CHARGER):
+            leg = find_path(grid, start, bay, blocked=blocked)
+            if leg is None:
+                continue
+            if best is None or len(leg) - 1 < best[0]:
+                best = (len(leg) - 1, bay)
+        return best
+
+    def can_finish_and_still_reach_a_charger(self, grid: Grid, now: float,
+                                             stops) -> bool:
+        """THE question, asked before taking on work and again while doing it.
+
+        Not "am I below 20%" -- a fixed line is wrong in both directions. It is
+        "if I drive this whole job and then drive on to the nearest charging
+        bay, do I still arrive with something in hand?"
+        """
+        blocked = self.blocked_map.cells(now)
+        work = self._walk(grid, blocked, self.cell, stops)
+        if work is None:
+            return False
+        end = stops[-1] if stops else self.cell
+        bay = self._nearest_charger(grid, blocked, end)
+        if bay is None:
+            return True                # no chargers on this map, carry on
+        need = (work + bay[0]) * self.percent_per_square() + self.BATTERY_RESERVE
+        return self.battery >= need
+
+    def _should_charge(self, grid: Grid, now: float) -> bool:
+        """Worked out at most every couple of seconds -- it costs a few route
+        searches, and the answer does not change between ticks."""
+        if now - self._charge_checked_at < self.CHARGE_RECHECK:
+            return self._charge_wanted
+        self._charge_checked_at = now
+
+        if self.task is not None and self.task.status is TaskStatus.CARRYING:
+            # Holding a parcel. Deliver it if we possibly can -- dropping a box
+            # in an aisle to go and charge is worse than arriving low. Divert
+            # only if we genuinely cannot make it, which the check when we took
+            # the job was meant to prevent ever happening.
+            blocked = self.blocked_map.cells(now)
+            work = self._walk(grid, blocked, self.cell, [self.task.dropoff])
+            bay = (self._nearest_charger(grid, blocked, self.task.dropoff)
+                   if work is not None else None)
+            if work is None or bay is None:
+                self._charge_wanted = False
+            else:
+                need = ((work + bay[0]) * self.percent_per_square()
+                        + self.BATTERY_MINIMUM)
+                self._charge_wanted = self.battery < need
+            return self._charge_wanted
+
+        stops = []
+        if self.task is not None:
+            stops = [self.task.pickup, self.task.dropoff]
+        self._charge_wanted = not self.can_finish_and_still_reach_a_charger(
+            grid, now, stops)
+        return self._charge_wanted
+
+    def _book_charger(self, grid: Grid, bus, now: float) -> Optional[str]:
+        """Claim a bay in the ordinary booking table, then drive to it.
+
+        Nothing new is invented here: a charging bay is a square, and squares
+        are booked for a window of time by whoever ranks highest. Because the
+        priority we book with is our urgency, the emptiest robot wins the bay
+        and everyone else keeps working and asks again in a moment. That is
+        what stops all twenty setting off for the chargers together.
+        """
+        blocked = self.blocked_map.cells(now)
+        top_up = max(0.0, self.CHARGE_UNTIL - self.battery) / self.CHARGE_RATE
+        urgency = self.charge_urgency()
+        best = None
+        for bay in grid.cells_of_kind(CellKind.CHARGER):
+            leg = find_path(grid, self.cell, bay, blocked=blocked)
+            if leg is None:
+                continue
+            squares = len(leg) - 1
+            travel = squares / max(self.travel_speed(), 0.1)
+            start, end = now, now + travel + top_up + self.CLEARANCE
+            key = node_key(bay)
+            mine = Reservation(robot_id=self.robot_id, resource=key,
+                               start=start, end=end, priority=urgency)
+            owner = self.table.owner(key, start, end)
+            if (owner is not None and owner.robot_id != self.robot_id
+                    and owner.rank <= mine.rank):
+                continue               # somebody emptier got there first
+            if best is None or squares < best[0]:
+                best = (squares, bay, start, end)
+
+        if best is None:
+            return None                # every bay spoken for; carry on working
+
+        squares, bay, start, end = best
+        # Not picked up yet? Put the job back so somebody with charge takes it.
+        handed_back = None
+        if self.task is not None and self.task.status is TaskStatus.ASSIGNED:
+            handed_back = self.task.task_id
+            self._drop_task()
+            if bus is not None:
+                self._publish(bus, TaskClaim(
+                    robot_id=self.robot_id, timestamp=now, seq=self.seq,
+                    task_id=handed_back, action="RELEASE"))
+
+        self.charger = bay
+        self._charge_slot = (start, end)
+        self.staging = None
+        self.staging_why = ""
+        self.set_goal(bay)
+        return (f"{self.robot_id} is low ({self.battery:.0f}%) -> charging bay "
+                f"({bay.x}, {bay.y})"
+                + (f", gave {handed_back} back" if handed_back else ""))
+
+    def _leave_charger(self, bus, now: float) -> str:
+        bay = self.charger
+        self.charger = None
+        self._charge_slot = None
+        self._charge_checked_at = -99.0
+        self._charge_wanted = False
+        if bay is not None:
+            key = node_key(bay)
+            self.table.release(self.robot_id, key)
+            old = self._claimed.pop(key, None)
+            if old is not None:
+                self._broadcast_reservation(bus, now, "RELEASE", old)
+        # Only "idle" if it is actually standing on a square. Part way along a
+        # step it is stopped, not idle, and saying otherwise used to snap it
+        # backwards onto the square behind it.
+        self.status = (RobotStatus.IDLE if self._progress == 0.0
+                       else RobotStatus.WAITING)
+        return f"{self.robot_id} is charged ({self.battery:.0f}%) and back on the job"
+
+    def manage_battery(self, grid: Grid, bus, now: float) -> Optional[str]:
+        """Decide about charge. Called once per tick, before anything moves."""
+        if self.status is RobotStatus.FAILED or self.halted:
+            return None
+
+        if self.status is RobotStatus.CHARGING:
+            if self.battery >= self.CHARGE_UNTIL:
+                return self._leave_charger(bus, now)
+            return None
+
+        if (self.charger is not None and self.cell == self.charger
+                and self._progress == 0.0):
+            self.status = RobotStatus.CHARGING
+            self.goal = None
+            self.path = []
+            return (f"{self.robot_id} reached the bay on {self.battery:.0f}% "
+                    f"and is charging")
+
+        if self.charger is not None:
+            # Somebody else has pointed us somewhere else -- the patrol loop
+            # does exactly this to any robot that is briefly without a
+            # destination. Going flat because scaffolding overwrote the trip to
+            # the charger is not acceptable, so say again where we are going.
+            if self.goal != self.charger:
+                self.set_goal(self.charger)
+
+            # Still on our way. Check we have not been outbid in the meantime.
+            #
+            # Every robot decides in the same tick, before anybody has heard
+            # anybody, so ten robots can each book the same four bays in the
+            # same instant -- and they did, and then all ten drove at four
+            # squares and wedged. Booking is only half of it: you have to keep
+            # listening, and stand down when you hear that somebody emptier
+            # than you wanted the bay. That is the whole point of sharing the
+            # table rather than asking a server.
+            key = node_key(self.charger)
+            start, end = self._charge_slot
+            mine = Reservation(robot_id=self.robot_id, resource=key,
+                               start=start, end=end,
+                               priority=self.charge_urgency())
+            owner = self.table.owner(key, start, end)
+            if (owner is not None and owner.robot_id != self.robot_id
+                    and owner.rank < mine.rank):
+                bay = self.charger
+                self._leave_charger(bus, now)
+                return (f"{self.robot_id} stood down from bay "
+                        f"({bay.x}, {bay.y}) for {owner.robot_id}, who is emptier")
+            return None
+
+        if not self._should_charge(grid, now):
+            return None
+        return self._book_charger(grid, bus, now)
 
     # ---------------------------------------------------------------- output
 
@@ -1723,6 +2477,11 @@ class Robot:
         """Plain data about this robot. Dicts and numbers only -- no web code."""
         return {
             "robot_id": self.robot_id,
+            "halted": self.halted,
+            "charging": self.status is RobotStatus.CHARGING,
+            "staging": [self.staging.x, self.staging.y] if self.staging else None,
+            "staging_why": self.staging_why,
+            "charger": [self.charger.x, self.charger.y] if self.charger else None,
             "cell": [self.cell.x, self.cell.y],
             "x": round(self.x, 3),
             "y": round(self.y, 3),
@@ -1737,7 +2496,10 @@ class Robot:
             "priority": self.priority,
             "messages_sent": self.messages_sent,
             "messages_heard": self.messages_heard,
-            "conflicts": [c.to_dict() for c in self.conflicts],
+            # Just the count. The full list of every robot's conflicts was
+            # three quarters of the robot payload and the dashboard never read
+            # it -- it uses the merged list the world publishes instead.
+            "conflict_count": len(self.conflicts),
             "blocked_by": self.blocked_by,
             "reroutes": self.reroutes,
             "last_decision": self.last_decision,
