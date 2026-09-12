@@ -46,14 +46,28 @@
   }
   .warn b{color:var(--red)}
 
+  /* ---------- top controls ---------- */
+  .top-controls{
+    flex:none; display:flex; flex-wrap:nowrap; align-items:center; gap:10px; padding:7px 16px;
+    background:var(--panel); border-bottom:1px solid var(--border);
+    white-space:nowrap; overflow-x:auto;
+  }
+  .controls-title{
+    flex:none; font-size:10px; letter-spacing:.12em; text-transform:uppercase;
+    color:var(--muted); font-weight:600; margin-right:4px;
+  }
+  .top-controls .controls-buttons{display:flex !important; flex:none; flex-wrap:nowrap !important; gap:7px; margin:0; grid-template-columns:none}
+  .controls-buttons button{min-width:110px}
+  .controls-rate{flex:none; min-width:220px}
+
   /* ---------- KPI strip ---------- */
   .kpis{
     display:flex; gap:1px; background:var(--border);
     border-bottom:1px solid var(--border); flex:none; overflow-x:auto;
   }
-  .kpi{background:var(--panel); padding:10px 18px; min-width:100px; flex:1; transition:background .3s}
+  .kpi{background:var(--panel); padding:6px 14px; min-width:100px; flex:1; transition:background .3s}
   .kpi .k{font-size:10px; letter-spacing:.09em; text-transform:uppercase; color:var(--muted)}
-  .kpi .v{font-family:var(--mono); font-size:20px; font-weight:600; margin-top:2px}
+  .kpi .v{font-family:var(--mono); font-size:17px; font-weight:600; margin-top:1px}
   .kpi .v.good{color:var(--green)} .kpi .v.warn{color:var(--amber)} .kpi .v.bad{color:var(--red)}
   .kpi.hit{background:rgba(248,113,113,.16)}
 
@@ -345,25 +359,6 @@
 <body>
 <div class="app">
 
-  <header>
-    <div>
-      <div class="brand">FLEET&#8209;<span>X</span> CONTROL CENTER</div>
-      <div class="sub">Part 1 &middot; Phase 9 &middot; robots bid for real jobs</div>
-    </div>
-    <div class="live off" id="live"><i class="dot"></i><span id="liveTxt">connecting</span></div>
-  </header>
-
-  <div class="warn">
-    <b>PHASE 9:</b>
-    <span>Press <b>Start orders</b>. Each job is shouted to the fleet and robots <b>bid</b> for it &mdash; cheapest wins, and nobody hands the work out. Kill a robot mid&#8209;job and watch its work get rescued.</span>
-  </div>
-
-  <div class="netdown" id="stale" style="background:rgba(248,113,113,.16);border-color:rgba(248,113,113,.5);color:#FCA5A5">
-    <b>&#8635; THIS PAGE IS OUT OF DATE</b>
-    <span>The code changed after this tab was opened, so you are looking at an
-      old version of the dashboard &mdash; buttons fixed since then will still
-      look broken. <b>Reload the page</b> (Cmd&#8209;R) to pick it up.</span>
-  </div>
 
   <div class="netdown" id="netdown">
     <b>&#128246; NETWORK DOWN</b>
@@ -372,6 +367,21 @@
       them until the link is back.</span>
   </div>
 
+      <div class="top-controls">
+        <div class="controls-title">Controls</div>
+        <div id="haltBanner"></div>
+        <div class="btns controls-buttons" style="margin-bottom:0">
+          <button data-fleet="add">+ Add robot</button>
+          <button data-fleet="remove">− Remove robot</button>
+          <button data-scen="orders">Start orders</button>
+          <button data-scen="stop">Stop all</button>
+        </div>
+        <div class="slider controls-rate" style="margin:0">
+          <label>Order rate</label>
+          <input type="range" id="rate" min="1" max="24" step="1" value="16">
+          <span class="val" id="rateVal">—</span>
+        </div>
+      </div>
   <div class="kpis" id="kpis"></div>
 
   <main>
@@ -382,50 +392,16 @@
     </div>
 
     <aside>
-      <div class="sec controls-fixed">
-        <h2>Controls</h2>
-        <div id="haltBanner"></div>
-        <div class="btns" style="margin-bottom:7px">
-          <button data-fleet="add">+ Add robot</button>
-          <button data-fleet="remove">− Remove robot</button>
-          <button data-scen="orders">Start orders</button>
-          <button data-scen="stop">Stop all</button>
-        </div>
-        <div class="btns" style="margin-bottom:7px">
-          <button data-human="add">&#128694; Add person</button>
-          <button data-human="remove">&#128694; Remove person</button>
-        </div>
-        <div class="slider" style="margin:0">
-          <label>Order rate</label>
-          <input type="range" id="rate" min="1" max="24" step="1" value="16">
-          <span class="val" id="rateVal">—</span>
-        </div>
-      </div>
 
-      <div class="sec">
-        <h2>Fleet <em id="selNote">— click one to control it</em></h2>
-        <div id="robots"></div>
-      </div>
 
-      <div class="sec">
-        <h2>People <em id="peopleNote"></em></h2>
-        <div id="people"></div>
-      </div>
+
 
       <div class="sec">
         <h2>Power <em>&mdash; fail one and watch the others cover</em></h2>
         <div class="power" id="power"></div>
       </div>
 
-      <div class="sec">
-        <h2>Where the work is <em id="predNote"></em></h2>
-        <div id="demand"></div>
-      </div>
 
-      <div class="sec">
-        <h2>Stock, moving itself closer <em id="slotNote"></em></h2>
-        <div class="slotmoves" id="reslotting"></div>
-      </div>
 
       <div class="sec">
         <h2>Battery <em id="battNote"></em></h2>
@@ -440,26 +416,9 @@
         <div id="healths"></div>
       </div>
 
-      <div class="sec">
-        <h2>Who gave way <em id="decNote"></em></h2>
-        <div class="decisions" id="decisions"></div>
-      </div>
 
-      <div class="sec">
-        <h2>Who is waiting for whom</h2>
-        <div class="waitg" id="waitg"></div>
-      </div>
 
-      <div class="sec">
-        <h2>Reservation table <em id="resNote"></em></h2>
-        <div class="rtable" id="rtable"></div>
-        <div id="stuckBox"></div>
-      </div>
 
-      <div class="sec">
-        <h2>Predicted conflicts <em id="confNote"></em></h2>
-        <div id="conflicts"></div>
-      </div>
 
       <div class="sec">
         <h2>Jobs <em id="taskNote"></em></h2>
@@ -493,57 +452,9 @@
         </div>
       </div>
 
-      <div class="sec">
-        <h2>Radio <em id="commsNote"></em></h2>
-        <div class="toggles" id="toggles"></div>
-        <div class="slider">
-          <label>Packet loss</label>
-          <input type="range" id="loss" min="0" max="90" step="5" value="0">
-          <span class="val" id="lossVal">0%</span>
-        </div>
-        <div class="slider">
-          <label>Delay</label>
-          <input type="range" id="lat" min="0" max="400" step="20" value="0">
-          <span class="val" id="latVal">0ms</span>
-        </div>
-      </div>
 
-      <div class="sec">
-        <h2>Security <em id="secNote"></em></h2>
-        <div class="btns" style="margin-bottom:8px">
-          <button class="wide" id="attackBtn">&#128272; Inject a fake message</button>
-        </div>
-        <div id="security"></div>
-      </div>
 
-      <div class="sec">
-        <h2>What <span id="viewOwner">R1</span> can hear</h2>
-        <div class="sees" id="sees"></div>
-        <div class="msgs" id="msgs" style="margin-top:11px"></div>
-      </div>
 
-      <div class="sec">
-        <h2>Map key</h2>
-        <div class="legend">
-          <div style="color:var(--muted);margin-bottom:2px">Coloured squares are the <b>building</b>. They never move.</div>
-          <div><i class="sw" style="background:#1B2531"></i> Shelf &mdash; racks are named by aisle, e.g. <span class="shelf">A14</span>. Hover one to see what is on it</div>
-          <div><i class="sw" style="background:#0D1319"></i> Aisle &mdash; open floor</div>
-          <div><i class="sw" style="background:#123240"></i> Packing bay &mdash; the 10 places an order can be delivered</div>
-          <div><i class="sw" style="background:#3A2E12"></i> Charging bay &mdash; 4 of them, booked like any other square</div>
-          <div style="color:var(--muted);margin:5px 0 2px">Shapes are the <b>work</b>. One pair per live order.</div>
-          <div><i class="sw" style="background:#22D3EE"></i> <b>Diamond</b> &mdash; collect this order here, off the shelf beside it</div>
-          <div><i class="sw" style="background:#22D3EE"></i> <b>Star</b> &mdash; deliver it here. A star always sits on a packing bay</div>
-          <div><i class="sw" style="background:#A78BFA"></i> <b>Dashed ring</b> &mdash; a robot waiting there on a hunch, not a job. See "Where the work is"</div>
-          <div><i class="sw" style="background:#F5A623"></i> <b>Person</b> &mdash; keeps walking on their own. Faint ring is the space no robot will enter</div>
-          <div style="color:var(--muted);margin-bottom:4px">Both are drawn in the colour of the robot that won the job.</div>
-          <div><i class="sw" style="background:#22D3EE;opacity:.35"></i> Tinted square &mdash; booked by the selected robot</div>
-          <div><i class="sw" style="background:#7F1D1D"></i> Hatched red &mdash; obstacle a robot has found</div>
-          <div><i class="sw" style="background:#34D399"></i> Green robot &mdash; stepping out of the way</div>
-          <div><i class="sw" style="background:#F5B841"></i> Amber ring + countdown &mdash; predicted conflict</div>
-          <div><i class="sw" style="background:#F87171"></i> Red burst &mdash; a collision</div>
-          <div><i class="sw" style="background:#334155"></i> Faint ghost &mdash; where the selected robot <em>believes</em> the others are</div>
-        </div>
-      </div>
 
       <div class="sec">
         <h2>Event feed</h2>
@@ -674,7 +585,6 @@ async function boot(){
   MAP = await (await fetch("/api/map")).json();
   buildShelfIndex();
   layout();
-  bindNetwork();
   bindRate();
   sendFocus();
   connect();
@@ -705,23 +615,12 @@ function connect(){
     if (now - lastPanels < PANEL_MS) { watchAll(prev); return; }
     lastPanels = now;
     renderKpis();
-    renderRobots();
     renderScenario();
-    renderDecisions();
     renderTasks();
     renderBlocks();
     renderNetwork();
-    renderStale();
     renderRate();
-    renderWaitGraph();
-    renderReservations();
-    renderConflicts();
-    renderToggles();
-    renderSees();
     renderHealth();
-    renderSecurity();
-    renderPeople();
-    renderReslotting();
     watchAll(prev);
   };
 }
@@ -754,8 +653,10 @@ function watchReslotting(state){
 
 function setLive(on){
   const el = document.getElementById("live");
+  const txt = document.getElementById("liveTxt");
+  if (!el || !txt) return;
   el.className = "live " + (on ? "on" : "off");
-  document.getElementById("liveTxt").textContent = on ? "live" : "disconnected";
+  txt.textContent = on ? "live" : "disconnected";
 }
 
 // ---------------------------------------------------------------- sizing
@@ -1409,11 +1310,6 @@ document.getElementById("drainBtn").addEventListener("click", async () => {
   showHint(out.message); log(out.message);
 });
 
-document.getElementById("attackBtn").addEventListener("click", async () => {
-  const out = await post("/api/attack", {});
-  showHint(out.message); log(out.message);
-});
-
 async function post(url, body){
   const res = await fetch(url, {
     method:"POST", headers:{"Content-Type":"application/json"},
@@ -1475,7 +1371,6 @@ function renderTasks(){
       </div>`).join("")
     : `<div class="none">no jobs yet — press Start orders</div>`);
 
-  renderDemand();
 
   const batts = STATE.robots.slice().sort((a,b) => a.battery - b.battery);
   const lowest = batts.length ? batts[0].battery : 100;
@@ -2095,7 +1990,6 @@ document.addEventListener("click", async (e) => {
     const note = document.getElementById("selNote");
     if (note) note.innerHTML =
       `&mdash; clicks control <b style="color:${colorFor(selected)}">${selected}</b>`;
-    if (STATE) { renderRobots(); renderSees(); renderReservations(); }
     return;
   }
 
