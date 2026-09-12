@@ -27,6 +27,7 @@ START_CELLS = [
 def spawn(context, *args, **kwargs):
     count = int(LaunchConfiguration("robots").perform(context))
     drive_mode = LaunchConfiguration("drive_mode").perform(context)
+    battery_topic = LaunchConfiguration("battery_topic").perform(context)
     orders_every = float(LaunchConfiguration("orders_every").perform(context))
 
     if count > len(START_CELLS):
@@ -43,6 +44,7 @@ def spawn(context, *args, **kwargs):
             parameters=[{
                 "robot_id": rid,
                 "drive_mode": drive_mode,
+                "battery_topic": battery_topic,
                 "start_cell": [cx, cy],
             }],
         ))
@@ -60,6 +62,8 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument("robots", default_value="3"),
         DeclareLaunchArgument("drive_mode", default_value="simple"),
+        DeclareLaunchArgument("battery_topic", default_value="battery_state",
+                              description="relative sensor_msgs/BatteryState topic"),
         DeclareLaunchArgument("orders_every", default_value="6.0",
                               description="seconds between orders, 0 to disable"),
         OpaqueFunction(function=spawn),

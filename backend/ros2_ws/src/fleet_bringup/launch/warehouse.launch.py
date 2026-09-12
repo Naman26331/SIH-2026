@@ -44,6 +44,7 @@ def spawn_everything(context, *args, **kwargs):
     pkg = get_package_share_directory("fleet_bringup")
     count = int(LaunchConfiguration("robots").perform(context))
     drive_mode = LaunchConfiguration("drive_mode").perform(context)
+    battery_topic = LaunchConfiguration("battery_topic").perform(context)
     orders_every = float(LaunchConfiguration("orders_every").perform(context))
     xacro_file = os.path.join(pkg, "models", "amr.urdf.xacro")
 
@@ -78,6 +79,7 @@ def spawn_everything(context, *args, **kwargs):
             parameters=[{
                 "robot_id": rid,
                 "drive_mode": drive_mode,
+                "battery_topic": battery_topic,
                 "start_cell": [gx, gy],
             }],
         )]))
@@ -120,6 +122,8 @@ def generate_launch_description():
         DeclareLaunchArgument("drive_mode", default_value="simple",
                               description="simple = built-in controller, "
                                           "nav2 = publish goals for Nav2"),
+        DeclareLaunchArgument("battery_topic", default_value="battery_state",
+                              description="relative sensor_msgs/BatteryState topic"),
         DeclareLaunchArgument("orders_every", default_value="6.0"),
         DeclareLaunchArgument("gui", default_value="true"),
 

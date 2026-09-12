@@ -40,7 +40,7 @@ import hashlib
 import hmac
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 # Issued to every real fleet member. Swap for per-robot certificates or a
 # rotating credential store on real hardware; nothing else in this file
@@ -129,26 +129,33 @@ def check_signature(message: Any) -> Verdict:
 
 
 class ReplayGuard:
-    """One robot's memory of the newest sequence number it has accepted from
-    each sender. Kept on the ROBOT, not the bus -- a real robot has no shared
-    memory with anyone else, and this must be something each one keeps for
-    itself, from what it has personally seen.
+    """One robot's newest accepted sequence per sender and message stream.
+
+    Kept on the ROBOT, not the bus -- a real robot has no shared memory with
+    anyone else. Streams matter because DDS only guarantees ordering within a
+    topic; pose and reservation callbacks may legitimately interleave.
     """
 
     def __init__(self, max_age: float = MAX_MESSAGE_AGE) -> None:
         self.max_age = max_age
-        self._last_seq: Dict[str, int] = {}
+        # DDS preserves writer order within one topic, not across independent
+        # topics. Track each signed message stream separately so a newer pose
+        # cannot make an earlier reservation look like a replay.
+        self._last_seq: Dict[Tuple[str, str], int] = {}
 
-    def check(self, sender: str, seq: int, timestamp: float, now: float) -> Verdict:
+    def check(self, sender: str, seq: int, timestamp: float, now: float,
+              stream: str = "") -> Verdict:
         if now - timestamp > self.max_age:
             return Verdict(False, f"stale ({now - timestamp:.1f}s old)")
-        last = self._last_seq.get(sender)
+        key = (sender, stream)
+        last = self._last_seq.get(key)
         if last is not None and seq <= last:
             return Verdict(False, f"replay (seq {seq}, already saw {last})")
-        self._last_seq[sender] = seq
+        self._last_seq[key] = seq
         return Verdict(True)
 
     def forget(self, sender: str) -> None:
         """A robot left or failed -- if it (or its name) comes back, its
         sequence numbers start over, and that must not look like a replay."""
-        self._last_seq.pop(sender, None)
+        for key in [key for key in self._last_seq if key[0] == sender]:
+            del self._last_seq[key]

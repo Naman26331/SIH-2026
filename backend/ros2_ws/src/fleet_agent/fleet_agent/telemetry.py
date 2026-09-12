@@ -111,7 +111,8 @@ class TelemetryProjector:
             if verdict:
                 verdict = self._guard.check(
                     sender, int(getattr(message, "seq", 0)),
-                    float(getattr(message, "timestamp", 0.0)), self.timestamp())
+                    float(getattr(message, "timestamp", 0.0)), self.timestamp(),
+                    stream=str(getattr(message, "type", type(message).__name__)))
             if not verdict:
                 self.bus.rejected += 1
                 self._rejections.append({"sender": sender, "reason": verdict.reason})

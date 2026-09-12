@@ -40,7 +40,7 @@ from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import LaserScan
+from sensor_msgs.msg import BatteryState, LaserScan
 from fleet_msgs.msg import OperatorGoal
 
 from . import translate as T
@@ -65,6 +65,7 @@ class FleetAgent(Node):
         self.declare_parameter("sensor_range", 3.0)     # squares
         self.declare_parameter("odom_topic", "odom")
         self.declare_parameter("scan_topic", "scan")
+        self.declare_parameter("battery_topic", "battery_state")
         self.declare_parameter("cmd_vel_topic", "cmd_vel")
         self.declare_parameter("goal_topic", "goal_pose")
         self.declare_parameter("linear_gain", 0.8)
@@ -96,6 +97,8 @@ class FleetAgent(Node):
                                  self.on_odom, sensor_qos)
         self.create_subscription(LaserScan, p("scan_topic").value,
                                  self.on_scan, sensor_qos)
+        self.create_subscription(BatteryState, p("battery_topic").value,
+                                 self.on_battery, sensor_qos)
 
         # ---- wheels out ----------------------------------------------------
         self.cmd_pub = self.create_publisher(Twist, p("cmd_vel_topic").value, 10)
@@ -178,6 +181,12 @@ class FleetAgent(Node):
         self.seen_blocked = list(hits)
         self.seen_clear = [c for c in seen if c not in hits]
 
+    def on_battery(self, msg: BatteryState) -> None:
+        """Use physical battery percentage; ROS reports it from 0.0 to 1.0."""
+        percentage = float(msg.percentage)
+        if math.isfinite(percentage) and percentage >= 0.0:
+            self.robot.battery = max(0.0, min(100.0, percentage * 100.0))
+
     def on_operator_goal(self, msg: OperatorGoal) -> None:
         """Accept authenticated dashboard goal addressed to this robot."""
         command = T.ros_to_operator_goal(msg)
@@ -186,7 +195,8 @@ class FleetAgent(Node):
         verdict = security.check_signature(command)
         if verdict:
             verdict = self._operator_guard.check(
-                command.robot_id, command.seq, command.timestamp, self.now())
+                command.robot_id, command.seq, command.timestamp, self.now(),
+                stream="OPERATOR_GOAL")
         if not verdict:
             self.get_logger().warning(f"Rejected operator goal: {verdict.reason}")
             return
@@ -213,7 +223,18 @@ class FleetAgent(Node):
         self.seen_blocked, self.seen_clear = [], []
 
         # 2. listen to everyone, and speak
-        self.robot.communicate(self.bus, now)
+        for note in self.robot.communicate(self.bus, now):
+            self.get_logger().info(note)
+
+        # Same operational checks as World.tick(), using only this robot's
+        # local state. Network loss slows/stops unsafe work, health remains
+        # current, and physical battery telemetry can trigger charging.
+        for note in (
+                self.robot.update_link_health(now),
+                self.robot.update_health(now),
+                self.robot.manage_battery(self.grid, self.bus, now)):
+            if note:
+                self.get_logger().info(note)
 
         # 3. jobs: bid, claim, collect, deliver
         for note in self.robot.work_on_tasks(self.grid, self.bus, now):

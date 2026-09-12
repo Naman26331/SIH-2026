@@ -94,7 +94,8 @@ class CentralPlanner:
             sender = getattr(message, "sender", "") or getattr(message, "robot_id", "")
             fresh = self._replay_guard.check(
                 sender, getattr(message, "seq", 0),
-                getattr(message, "timestamp", 0.0), now)
+                getattr(message, "timestamp", 0.0), now,
+                stream=str(getattr(message, "type", type(message).__name__)))
             if not fresh:
                 continue
 

@@ -7,6 +7,7 @@ the ROS 2 gateway will build the same object from live robot messages, so the
 dashboard code does not change at all.
 """
 
+import math
 import random
 import time
 from typing import Callable, Dict, List, Optional
@@ -215,8 +216,13 @@ class World:
 
     @property
     def active_robots(self) -> List[Robot]:
-        """Robots that are switched on. A FAILED robot cannot be crashed into."""
+        """Robots that are switched on and can make decisions or move."""
         return [r for r in self.robots.values() if r.status is not RobotStatus.FAILED]
+
+    @property
+    def physical_robots(self) -> List[Robot]:
+        """Every body still on the floor, including a failed robot."""
+        return list(self.robots.values())
 
     # ---------------------------------------------------------------- clock
 
@@ -522,8 +528,9 @@ class World:
         # Phase 22: people walk too. Anyone with nowhere to go gets a new
         # random destination -- the same idea the old robot free-roam patrol
         # used, just for the one thing a person here actually does: wander.
-        robot_positions = [(r.x, r.y) for r in self.robots.values()
-                          if r.status is not RobotStatus.FAILED]
+        # A failed robot stops moving; its body does not disappear. People
+        # must still walk around it.
+        robot_positions = [(r.x, r.y) for r in self.physical_robots]
         for human in self.humans.values():
             if not human.path:
                 floor = self.grid.cells_of_kind(CellKind.FLOOR)
@@ -872,6 +879,13 @@ class World:
         robot = self.get(robot_id)
         if robot is None:
             return {"ok": False, "message": f"There is no robot called {robot_id}."}
+        # The grid simulator has no braking-distance model. Settle a robot
+        # that fails mid-step onto the nearest endpoint before freezing it.
+        # Leaving it fractionally across two cells can seal an otherwise
+        # passable one-cell aisle forever; making it vanish is unsafe too.
+        stopped_at = Cell(math.floor(robot.x + 0.5),
+                          math.floor(robot.y + 0.5))
+        robot.place(stopped_at)
         robot.status = RobotStatus.FAILED
         robot.release_all(self.bus, self.sim_time)
         held = self.board.release_all(robot_id)
@@ -933,13 +947,17 @@ class World:
             if robot.status is RobotStatus.FAILED:
                 continue
 
-            seen_blocked = [c for c in self.obstacles
-                            if within_range(robot.x, robot.y, c, SENSOR_RANGE)]
+            seen_blocked = [
+                c for c in self.obstacles
+                if within_range(robot.x, robot.y, c, SENSOR_RANGE)
+                and self._has_line_of_sight(robot.x, robot.y, c.x, c.y)
+            ]
 
             # Squares it believes are blocked, can see plainly, and are empty.
             seen_clear = [c for c in robot.blocked_cells(self.sim_time)
                           if c not in self.obstacles
-                          and within_range(robot.x, robot.y, c, SENSOR_RANGE)]
+                          and within_range(robot.x, robot.y, c, SENSOR_RANGE)
+                          and self._has_line_of_sight(robot.x, robot.y, c.x, c.y)]
 
             # Robots reflect a laser beam exactly like a dropped pallet does.
             # This is what makes the safety reflex work with the radio dead --
@@ -948,8 +966,8 @@ class World:
                 [(other.x, other.y, other.cell)
                  for other in self.robots.values()
                  if other.robot_id != robot.robot_id
-                 and other.status is not RobotStatus.FAILED
-                 and within_range(robot.x, robot.y, other.cell, SENSOR_RANGE + 1.0)],
+                 and within_range(robot.x, robot.y, other.cell, SENSOR_RANGE + 1.0)
+                 and self._has_line_of_sight(robot.x, robot.y, other.x, other.y)],
                 self.sim_time)
 
             # Phase 22: the same laser sees people too. A dedicated, wider
@@ -959,7 +977,9 @@ class World:
                 [(human.human_id, human.x, human.y, human.cell)
                  for human in self.humans.values()
                  if within_range(robot.x, robot.y, human.cell,
-                                 robot.PERSON_SENSE_RANGE)],
+                                 robot.PERSON_SENSE_RANGE)
+                 and self._has_line_of_sight(robot.x, robot.y,
+                                             human.x, human.y)],
                 self.sim_time)
 
             for note in robot.sense(seen_blocked, seen_clear, self.sim_time):
@@ -969,6 +989,56 @@ class World:
                     "robot_id": robot.robot_id, "text": note,
                 })
                 del self.decisions[:-20]
+
+    def _has_line_of_sight(self, x0: float, y0: float,
+                           x1: float, y1: float) -> bool:
+        """Whether a laser ray reaches its target without crossing a shelf.
+
+        Coordinates name cell centres. This grid traversal visits every cell
+        crossed by the ray. Exact corner crossings are conservative: a shelf
+        on either side blocks sight instead of letting the laser see through
+        a zero-width diagonal crack.
+        """
+        start = Cell(math.floor(x0 + 0.5), math.floor(y0 + 0.5))
+        target = Cell(math.floor(x1 + 0.5), math.floor(y1 + 0.5))
+        if not self.grid.in_bounds(start) or not self.grid.in_bounds(target):
+            return False
+        if start == target:
+            return True
+
+        dx, dy = x1 - x0, y1 - y0
+        step_x = 1 if dx > 0 else (-1 if dx < 0 else 0)
+        step_y = 1 if dy > 0 else (-1 if dy < 0 else 0)
+        infinity = float("inf")
+        delta_x = abs(1.0 / dx) if dx else infinity
+        delta_y = abs(1.0 / dy) if dy else infinity
+        boundary_x = start.x + (0.5 if step_x > 0 else -0.5)
+        boundary_y = start.y + (0.5 if step_y > 0 else -0.5)
+        max_x = (boundary_x - x0) / dx if dx else infinity
+        max_y = (boundary_y - y0) / dy if dy else infinity
+        current = start
+
+        def blocks(cell: Cell) -> bool:
+            return cell != target and not self.grid.is_walkable(cell)
+
+        while current != target:
+            if max_x < max_y:
+                current = Cell(current.x + step_x, current.y)
+                max_x += delta_x
+            elif max_y < max_x:
+                current = Cell(current.x, current.y + step_y)
+                max_y += delta_y
+            else:
+                side_x = Cell(current.x + step_x, current.y)
+                side_y = Cell(current.x, current.y + step_y)
+                if blocks(side_x) or blocks(side_y):
+                    return False
+                current = Cell(current.x + step_x, current.y + step_y)
+                max_x += delta_x
+                max_y += delta_y
+            if blocks(current):
+                return False
+        return True
 
     # ------------------------------------------------ predictions (Phase 4)
 
@@ -1081,11 +1151,14 @@ class World:
         any pair this catches, since two robots resting exactly on grid
         points are never closer than 1.0 squares apart to begin with.
         """
-        robots = self.active_robots
+        robots = self.physical_robots
         close_now = set()
         for i in range(len(robots)):
             for j in range(i + 1, len(robots)):
                 a, b = robots[i], robots[j]
+                if (a.status is RobotStatus.FAILED
+                        and b.status is RobotStatus.FAILED):
+                    continue
                 gap_x, gap_y = a.x - b.x, a.y - b.y
                 if gap_x * gap_x + gap_y * gap_y >= GEOMETRY_SAFE_GAP ** 2:
                     continue
@@ -1093,8 +1166,10 @@ class World:
                 close_now.add(pair)
                 if pair not in self._geometry_close:
                     self.geometry_interventions += 1
-                a.geometry_brake(now, dt, b.robot_id)
-                b.geometry_brake(now, dt, a.robot_id)
+                if a.status is not RobotStatus.FAILED:
+                    a.geometry_brake(now, dt, b.robot_id)
+                if b.status is not RobotStatus.FAILED:
+                    b.geometry_brake(now, dt, a.robot_id)
         self._geometry_close = close_now
 
     # ----------------------------------------------------------- collisions
@@ -1121,7 +1196,7 @@ class World:
         this the same crash would be counted 20 times and the benchmark would
         be nonsense.
         """
-        robots = self.active_robots
+        robots = self.physical_robots
         touching_now = set()
 
         for i in range(len(robots)):

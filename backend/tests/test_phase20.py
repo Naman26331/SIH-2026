@@ -104,6 +104,16 @@ class TestReplayProtection(unittest.TestCase):
         g.check("R2", 10, 0.0, 0.0)
         self.assertFalse(g.check("R2", 3, 0.0, 0.0))
 
+    def test_different_dds_topics_do_not_reject_each_other(self):
+        g = security.ReplayGuard()
+        self.assertTrue(g.check("R2", 10, 0.0, 0.0, stream="POSE"))
+        self.assertTrue(g.check("R2", 3, 0.0, 0.0, stream="RESERVATION"))
+
+    def test_lower_sequence_on_same_dds_topic_is_still_rejected(self):
+        g = security.ReplayGuard()
+        g.check("R2", 10, 0.0, 0.0, stream="POSE")
+        self.assertFalse(g.check("R2", 3, 0.0, 0.0, stream="POSE"))
+
     def test_a_very_old_message_is_rejected_even_with_a_fresh_seq(self):
         g = security.ReplayGuard()
         self.assertFalse(g.check("R2", 1, 0.0, 999.0))
@@ -119,6 +129,14 @@ class TestReplayProtection(unittest.TestCase):
         self.assertFalse(g.check("R3", 1, 0.0, 0.0))
         g.forget("R3")
         self.assertTrue(g.check("R3", 1, 0.0, 0.0))
+
+    def test_forgetting_sender_clears_every_topic(self):
+        g = security.ReplayGuard()
+        g.check("R3", 900, 0.0, 0.0, stream="POSE")
+        g.check("R3", 800, 0.0, 0.0, stream="RESERVATION")
+        g.forget("R3")
+        self.assertTrue(g.check("R3", 1, 0.0, 0.0, stream="POSE"))
+        self.assertTrue(g.check("R3", 1, 0.0, 0.0, stream="RESERVATION"))
 
 
 class TestFleetTrafficIsNeverFalselyRejected(unittest.TestCase):

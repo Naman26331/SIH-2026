@@ -687,7 +687,8 @@ class Robot:
 
             fresh = self._replay_guard.check(
                 sender, getattr(message, "seq", 0),
-                getattr(message, "timestamp", 0.0), now)
+                getattr(message, "timestamp", 0.0), now,
+                stream=str(kind))
             if not fresh:
                 self.messages_rejected += 1
                 notes.append(f"{self.robot_id} rejected a {kind} from "
@@ -1846,6 +1847,16 @@ class Robot:
             if task is None:
                 return
             if message.action == "CLAIM":
+                # Pickup is a physical commitment and DONE is terminal. A
+                # delayed claim from another bidder must not roll either state
+                # backwards on this robot's local board.
+                if task.status in (TaskStatus.CARRYING, TaskStatus.DONE):
+                    if (task.assigned_robot == self.robot_id
+                            and task.status is TaskStatus.CARRYING):
+                        self._task_notes.append(
+                            f"{self.robot_id} ignored late claim for "
+                            f"{task.task_id} - parcel already collected")
+                    return
                 # Somebody says they have it. If we thought it was ours and
                 # their bid is better, let it go -- two robots doing one job is
                 # wasteful, and the rule says the cheaper bid wins.
@@ -2316,7 +2327,22 @@ class Robot:
         was the same as the old one, and wait for ever.
         """
         cells = {Cell(n.cell[0], n.cell[1]) for n in self.fleet.fresh(now)}
-        cells.update(cell for (_, _, cell) in self.local_contacts)
+        for x, y, cell in self.local_contacts:
+            cells.add(cell)
+            # A robot can fail between cell centres. Once sensors confirm the
+            # body is stationary, also mark every neighbouring centre inside
+            # its physical safety radius. Otherwise A* repeatedly chooses a
+            # technically different cell that the safety brake can never let
+            # this robot enter.
+            since = self._contact_since.get((cell.x, cell.y), now)
+            if now - since < self.CONTACT_STILL_AFTER:
+                continue
+            for neighbour in (
+                    Cell(cell.x + 1, cell.y), Cell(cell.x - 1, cell.y),
+                    Cell(cell.x, cell.y + 1), Cell(cell.x, cell.y - 1)):
+                gap_x, gap_y = x - neighbour.x, y - neighbour.y
+                if gap_x * gap_x + gap_y * gap_y < self.SAFE_GAP ** 2:
+                    cells.add(neighbour)
         return list(cells)
 
     def link_quiet_for(self, now: float) -> float:

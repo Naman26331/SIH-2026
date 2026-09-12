@@ -146,13 +146,13 @@ class TestCollisionCounting(unittest.TestCase):
         self.assertIn(e["reason"], ("touching", "same square", "head-on swap"))
         self.assertAlmostEqual(e["y"], 8.0, places=1)
 
-    def test_failed_robots_are_not_crashed_into(self):
+    def test_failed_robot_still_has_a_physical_body(self):
         w = blind(World())
         dead = w.add_robot(Robot("R1", Cell(10, 8)))
         dead.status = RobotStatus.FAILED
         w.add_robot(Robot("R2", Cell(10, 8)))
         w.tick(0.05)
-        self.assertEqual(w.collisions, 0)
+        self.assertEqual(w.collisions, 1)
 
     def test_reset_counters_clears_everything(self):
         w = World()
