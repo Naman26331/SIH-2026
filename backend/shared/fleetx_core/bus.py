@@ -79,6 +79,12 @@ class InMemoryBus(FleetBus):
         self.dropped = 0
         self.recent: Deque[Any] = deque(maxlen=40)
 
+        # World.tick() batches the communication pass so robot list order
+        # cannot decide who hears whom in the current tick. Outside that pass
+        # publish() remains immediate, preserving normal bus behaviour.
+        self._batching = False
+        self._pending: List[Tuple[Any, Any]] = []
+
     # ------------------------------------------------------------ the clock
 
     def set_time(self, now: float) -> None:
@@ -123,6 +129,15 @@ class InMemoryBus(FleetBus):
             self.dropped += 1
             return
 
+        if self._batching:
+            self._pending.append((message, sender))
+            return
+
+        self._fan_out(message, sender)
+
+    def _fan_out(self, message: Any, sender: Any) -> None:
+        """Deliver one already-counted message to registered inboxes."""
+
         for robot_id, inbox in self._inboxes.items():
             if robot_id == sender:
                 continue                       # a robot does not talk to itself
@@ -131,6 +146,20 @@ class InMemoryBus(FleetBus):
                 continue
             delay = self.latency + (self._rng.random() * self.jitter if self.jitter else 0.0)
             inbox.append((self._now + delay, message))
+
+    def begin_batch(self) -> None:
+        """Hold new messages until every robot has completed its receive pass."""
+        if self._batching:
+            raise RuntimeError("FleetBus message batch already open.")
+        self._batching = True
+
+    def end_batch(self) -> None:
+        """Atomically expose messages produced during the communication pass."""
+        pending = self._pending
+        self._pending = []
+        self._batching = False
+        for message, sender in pending:
+            self._fan_out(message, sender)
 
     def poll(self, robot_id: str) -> List[Any]:
         """Hand over every message that has finished travelling."""
@@ -185,6 +214,8 @@ class InMemoryBus(FleetBus):
         self._now = now
         for inbox in self._inboxes.values():
             inbox.clear()
+        self._pending.clear()
+        self._batching = False
 
     def stats(self) -> Dict[str, Any]:
         return {

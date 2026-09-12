@@ -242,13 +242,20 @@ class World:
         # Phase 23: authentication happens INSIDE communicate(), before a
         # message is even handed to the rest of the brain -- a forged or
         # replayed one is logged here and goes no further.
-        for robot in self.robots.values():
-            for note in robot.communicate(self.bus, self.sim_time):
-                self.decisions.append({
-                    "sim_time": round(self.sim_time, 2),
-                    "robot_id": robot.robot_id, "text": note,
-                })
-                del self.decisions[:-20]
+        batched = hasattr(self.bus, "begin_batch") and hasattr(self.bus, "end_batch")
+        if batched:
+            self.bus.begin_batch()
+        try:
+            for robot in self.robots.values():
+                for note in robot.communicate(self.bus, self.sim_time):
+                    self.decisions.append({
+                        "sim_time": round(self.sim_time, 2),
+                        "robot_id": robot.robot_id, "text": note,
+                    })
+                    del self.decisions[:-20]
+        finally:
+            if batched:
+                self.bus.end_batch()
 
         # Phase 14: has the network gone? Each robot decides for itself, from
         # whether anything at all has reached it lately.
@@ -368,7 +375,11 @@ class World:
                 del self.decisions[:-20]
 
         for robot in self.robots.values():
-            robot.decide(self.grid, cost_fn, self.sim_time)
+            robot.decide(
+                self.grid, cost_fn, self.sim_time,
+                traffic_aware=(self.coordination == "FLEETX"
+                               and self.reservations_enabled),
+            )
 
         # Phase 4: every robot looks at its own plan against everyone else's.
         # It only LOOKS. Phase 5 books the square, Phase 6 decides who yields.

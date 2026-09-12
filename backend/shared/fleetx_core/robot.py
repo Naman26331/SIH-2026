@@ -298,7 +298,7 @@ class Robot:
     # -------------------------------------------------------------- think
 
     def decide(self, grid: Grid, cost_fn: Optional[Callable] = None,
-               now: float = 0.0) -> None:
+               now: float = 0.0, traffic_aware: bool = True) -> None:
         """Work out what to do next. BOTH the simulator and ROS 2 call this.
 
         It only changes the robot's plan and status. It never moves anything.
@@ -386,7 +386,18 @@ class Robot:
             return
 
         # Need a route.
-        route = find_path(grid, self.cell, self.goal, cost_fn,
+        # Normal FLEET-X planning starts from this robot's OWN received
+        # reservations, intents and sensor contacts. No world/global traffic
+        # count is consulted. Baseline/central experiments explicitly disable
+        # this in World.tick() so their route choice remains unchanged.
+        route_cost = cost_fn
+        if route_cost is None and traffic_aware and self.table is not None:
+            route_cost = avoidance_cost(
+                self.table, self.robot_id, now,
+                occupied=self.known_occupied(now),
+            )
+
+        route = find_path(grid, self.cell, self.goal, route_cost,
                           blocked=self.blocked_map.cells(now))
         if route is None:
             # No way through. Sit still rather than guess.
@@ -1201,7 +1212,12 @@ class Robot:
         ]
         for key, mine in checks:
             if mine is None:
-                continue
+                # Safety invariant: booking failure must stop motion, not
+                # silently bypass the reservation system. Mid-edge also stops
+                # immediately and existing back-out recovery can unwind it.
+                self.blocked_by = "unreserved"
+                self._set_hold(True, now, dt, emergency=True)
+                return
             other = self.table.blocked_by(self.robot_id, key, mine.start, mine.end)
             if other is not None:
                 self.blocked_by = other
@@ -2103,7 +2119,7 @@ class Robot:
         if self.health_band == HEALTH_CRITICAL:
             return None
 
-        congestion = float(len(blocked)) + len(self.fleet.fresh(now)) * 0.5
+        congestion = self.local_route_congestion(to_pickup, leg, now)
         return bid_cost(
             distance_to_pickup=len(to_pickup) - 1,
             leg_distance=len(leg) - 1,
@@ -2112,6 +2128,42 @@ class Robot:
             congestion=congestion,
             task_priority=task.priority,
         )
+
+    def local_route_congestion(self, to_pickup: List[Cell],
+                               pickup_to_dropoff: List[Cell],
+                               now: float) -> float:
+        """Route-specific congestion from this robot's local knowledge only.
+
+        One contested route cell counts once even when both intent and
+        reservation report the same robot. Unrelated robots and obstacles on
+        the other side of the warehouse contribute nothing.
+        """
+        route = list(to_pickup[1:]) + list(pickup_to_dropoff[1:])
+        route_cells = set(route)
+        if not route_cells:
+            return 0.0
+
+        contested = route_cells.intersection(self.known_occupied(now))
+
+        # Fresh peer intent: only cells intersecting this candidate trip.
+        for note in self.fleet.fresh(now):
+            intended = {Cell(*pair) for pair in note.planned_nodes}
+            intended.add(Cell(*note.cell))
+            contested.update(route_cells.intersection(intended))
+
+        # Locally received time reservations near our estimated arrival.
+        speed = max(self.travel_speed(), 0.1)
+        dwell = 1.0 / speed
+        for index, cell in enumerate(route):
+            arrival = now + (index + 1) * dwell
+            holder = self.table.owner(
+                node_key(cell), arrival - self.CLEARANCE,
+                arrival + dwell + self.CLEARANCE,
+            )
+            if holder is not None and holder.robot_id != self.robot_id:
+                contested.add(cell)
+
+        return float(len(contested))
 
     def _take_task(self, task: Task, now: float) -> None:
         # Real work beats a guess, always and immediately.
