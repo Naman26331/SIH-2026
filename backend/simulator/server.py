@@ -124,6 +124,7 @@ class Simulation:
     """Runs the world forward on a background thread, safely."""
 
     def __init__(self, world: World):
+        self.mode = "simulator"
         self.world = world
         self.scenarios = Scenarios(world)
         # Which robot the dashboard is currently showing in detail. Only that
@@ -321,6 +322,62 @@ class Simulation:
             return {"ok": True, "message": "Counters reset to zero."}
 
 
+class LiveFleet:
+    """HTTP-facing live ROS fleet. Never advances or controls a simulation."""
+
+    def __init__(self, gateway):
+        self.mode = "ros2"
+        self.gateway = gateway
+        self.world = gateway.world
+        self.focus: Optional[str] = None
+
+    def start(self) -> None:
+        pass
+
+    def stop(self) -> None:
+        pass
+
+    def snapshot(self) -> dict:
+        snap = self.gateway.snapshot(self.focus)
+        snap.update({
+            "build": _build_stamp(), "server_build": SERVER_BUILD,
+            "scenario": "ros2_live", "order_every": None,
+            "auto": False, "orders_running": True,
+        })
+        return snap
+
+    def map_data(self) -> dict:
+        with self.gateway.lock:
+            data = self.world.grid.to_dict()
+            data["shelves"] = self.world.inventory.to_dict()["shelves"]
+            return data
+
+    def set_goal(self, robot_id: str, x: int, y: int) -> dict:
+        return self.gateway.publish_goal(robot_id, x, y)
+
+    def set_focus(self, robot_id) -> dict:
+        with self.gateway.lock:
+            self.focus = robot_id if robot_id in self.world.robots else None
+        return {"ok": True, "message": f"Showing {self.focus or 'nobody'}."}
+
+    @staticmethod
+    def _unsupported(*_args, **_kwargs) -> dict:
+        return {"ok": False, "message": "Simulator control unavailable in ROS 2 live mode."}
+
+    run_scenario = _unsupported
+    silence = _unsupported
+    drain_batteries = _unsupported
+    attack = _unsupported
+    human = _unsupported
+    order_rate = _unsupported
+    fleet_size = _unsupported
+    cut_network = _unsupported
+    set_network = _unsupported
+    robot_power = _unsupported
+    obstacle = _unsupported
+    reset = _unsupported
+
+
 class Handler(BaseHTTPRequestHandler):
     """Answers the browser. Held on the server as `sim`."""
 
@@ -336,9 +393,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/api/health":
-            self._send_json({"ok": True, "service": "fleet-x-backend"})
+            self._send_json({"ok": True, "service": "fleet-x-backend",
+                             "mode": self.sim.mode})
         elif self.path == "/api/compare/stream":
-            self._send_stream(self.compare.snapshot)
+            if self.compare is None:
+                self._send_json({"ok": False, "message": "Comparison simulator disabled in ROS 2 mode."},
+                                status=409)
+            else:
+                self._send_stream(self.compare.snapshot)
         elif self.path == "/api/map":
             self._send_json(self.sim.map_data())
         elif self.path == "/api/state":
@@ -363,10 +425,11 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(self.rfile.read(length) or b"{}")
 
             if self.path == "/api/compare":
-                result = self.compare.command(
+                result = (self.compare.command(
                     body.get("action", "start"),
                     robots=body.get("robots"), every=body.get("every"),
-                    speed=body.get("speed", 1))
+                    speed=body.get("speed", 1)) if self.compare is not None
+                    else {"ok": False, "message": "Comparison simulator disabled in ROS 2 mode."})
             elif self.path == "/api/goal":
                 result = self.sim.set_goal(
                     body.get("robot_id", "R1"), body["x"], body["y"]
@@ -462,18 +525,22 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(world: Optional[World] = None, port: int = 8000,
-          host: str = "127.0.0.1"):
-    """Start the simulation and the web server. Blocks until Ctrl+C."""
-    sim = Simulation(world if world is not None else phase2_world())
+          host: str = "127.0.0.1", gateway=None):
+    """Start API with either simulator or explicit live ROS gateway."""
+    sim = LiveFleet(gateway) if gateway is not None else Simulation(
+        world if world is not None else phase2_world())
     # Phase 21. Off by default everywhere else (it changes which square an
     # order actually collects from -- see OrderGenerator.tick()), but the
     # live dashboard is exactly where a judge should be able to watch it
     # happen and read why.
-    sim.world.reslotting_enabled = True
+    if gateway is None:
+        sim.world.reslotting_enabled = True
     sim.start()
 
-    compare = ComparisonRunner()
-    compare.start()
+    compare = None
+    if gateway is None:
+        compare = ComparisonRunner()
+        compare.start()
 
     Handler.sim = sim
     Handler.compare = compare
@@ -498,7 +565,7 @@ def serve(world: Optional[World] = None, port: int = 8000,
 
     banner = (
         "\n"
-        "  FLEET-X  ---  Part 1, Phase 14: keeps working when the network dies\n"
+        f"  FLEET-X backend ({'ROS 2 live' if gateway is not None else 'simulator'})\n"
         "  " + "-" * 58 + "\n"
         f"  Backend API:                 {url}/api/health\n"
         f"  Code version:                {SERVER_BUILD}\n"
@@ -513,5 +580,6 @@ def serve(world: Optional[World] = None, port: int = 8000,
         print("\n  Stopping FLEET-X. Bye.\n")
     finally:
         sim.stop()
-        compare.stop()
+        if compare is not None:
+            compare.stop()
         server.server_close()

@@ -20,6 +20,7 @@ from fleet_msgs.msg import Task
 from . import translate as T
 from .brain import Cell, TaskAnnounce, default_grid
 from .brain import Grid  # noqa: F401  (kept for type clarity)
+from fleetx_core import security
 
 PRODUCTS = ["Wireless Mouse", "Keyboard", "USB Hub", "Webcam", "Headphones",
             "Monitor Stand", "Laptop Sleeve", "Power Bank", "HDMI Cable"]
@@ -52,7 +53,6 @@ class OrderSource(Node):
 
         self.count = 0
         self.seq = 0
-        self._t0 = self.get_clock().now().nanoseconds * 1e-9
         self.create_timer(self.every, self.emit)
         self.get_logger().info(
             f"Order source up: one order every {self.every:g}s"
@@ -66,7 +66,7 @@ class OrderSource(Node):
         pickup = self.rng.choice(self.pickups)
         dropoff = self.rng.choice(self.dropoffs)
         product = self.rng.choice(PRODUCTS)
-        now = self.get_clock().now().nanoseconds * 1e-9 - self._t0
+        now = self.get_clock().now().nanoseconds * 1e-9
 
         announce = TaskAnnounce(
             robot_id="ORDERS", timestamp=now, seq=self.seq,
@@ -74,6 +74,7 @@ class OrderSource(Node):
             pickup=(pickup.x, pickup.y), dropoff=(dropoff.x, dropoff.y),
             product=product, priority=self.rng.choice([5, 5, 5, 6, 7]),
             flexible=True)
+        security.seal(announce)
         self.pub.publish(T.task_to_ros(announce))
         self.get_logger().info(
             f"ORDER {announce.task_id}: {product} - collect "

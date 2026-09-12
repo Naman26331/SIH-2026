@@ -17,7 +17,7 @@ from .deadlock import (STUCK_SECONDS, WaitForGraph, Waiting, choose_victim)
 from .fleet_view import DEFAULT_STALE_AFTER, FleetView, Neighbour
 from .messages import (BlockedAisle, CentralCommand, ConflictAlert, Heartbeat,
                        IntentUpdate, MessageType, PathReservation, PoseUpdate,
-                       TaskAnnounce, TaskBid, TaskClaim, WaitReport,
+                       OperatorGoal, TaskAnnounce, TaskBid, TaskClaim, WaitReport,
                        YieldRequest, from_dict)
 from .grid import Cell, CellKind, Grid, default_grid
 from .central import CentralPlanner
@@ -38,7 +38,7 @@ from .world import (COLLISION_DISTANCE, GEOMETRY_SAFE_GAP, World, fleet_world,
                     phase1_world, phase2_world)
 
 __all__ = [
-    "Inventory", "Shelf", "CATALOGUE", "Human", "CentralCommand",
+    "Inventory", "Shelf", "CATALOGUE", "Human", "CentralCommand", "OperatorGoal",
     "CentralPlanner", "Reslotter", "SlotMove",
     "Cell", "CellKind", "Grid", "default_grid",
     "find_path", "manhattan", "uniform_cost",

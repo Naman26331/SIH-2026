@@ -23,6 +23,7 @@ from builtin_interfaces.msg import Time as RosTime
 
 from fleet_msgs.msg import (BatteryStatus, BlockedAisle as BlockedAisleMsg,
                             ConflictAlert as ConflictAlertMsg,
+                            OperatorGoal as OperatorGoalMsg,
                             PathReservation as PathReservationMsg, RobotIntent,
                             RobotState, Task as TaskMsg, TaskBid as TaskBidMsg,
                             TaskClaim as TaskClaimMsg,
@@ -32,6 +33,7 @@ from fleet_msgs.msg import (BatteryStatus, BlockedAisle as BlockedAisleMsg,
 from .brain import (BlockedAisle, Cell, ConflictAlert, Heartbeat, IntentUpdate,
                     PathReservation, PoseUpdate, TaskAnnounce, TaskBid,
                     TaskClaim, WaitReport, YieldRequest)
+from fleetx_core import OperatorGoal
 
 RESOLUTION = 1.0        # metres per grid square
 
@@ -234,6 +236,17 @@ def yield_to_ros(m: YieldRequest) -> YieldRequestMsg:
     return out
 
 
+def operator_goal_to_ros(m: OperatorGoal) -> OperatorGoalMsg:
+    out = OperatorGoalMsg()
+    out.robot_id = m.robot_id
+    out.stamp = to_ros_time(m.timestamp)
+    out.seq = m.seq
+    out.tag = getattr(m, "tag", "")
+    out.target_robot = m.target_robot
+    out.target = [int(m.target[0]), int(m.target[1])]
+    return out
+
+
 # ------------------------------------------------------- ROS 2 -> brain
 
 def ros_to_pose(m: RobotState) -> PoseUpdate:
@@ -336,5 +349,15 @@ def ros_to_yield(m: YieldRequestMsg) -> YieldRequest:
         robot_id=m.robot_id, timestamp=from_ros_time(m.stamp), seq=m.seq,
         target=m.target, resource=(int(m.resource[0]), int(m.resource[1])),
         reason=m.reason)
+    out.tag = m.tag
+    return out
+
+
+def ros_to_operator_goal(m: OperatorGoalMsg) -> OperatorGoal:
+    out = OperatorGoal(
+        robot_id=m.robot_id, timestamp=from_ros_time(m.stamp), seq=m.seq,
+        target_robot=m.target_robot,
+        target=(int(m.target[0]), int(m.target[1])),
+    )
     out.tag = m.tag
     return out

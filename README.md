@@ -38,7 +38,7 @@ Start with:
 - Intersection reservation
 - Conflict resolution
 - Dynamic rerouting
-- React dashboard
+- Browser dashboard (HTML/CSS/JavaScript)
 
 Then add task allocation, inventory intelligence, demand prediction, battery management and failure recovery.
 
@@ -75,4 +75,30 @@ backend/
 frontend/
 ├── dashboard/           2D warehouse monitoring UI
 └── run.py               frontend server and backend proxy
+```
+
+Data path: `ROS 2/DDS → backend gateway → JSON/SSE API → laptop dashboard`.
+Backend never serves frontend files. Frontend never imports ROS code.
+
+## Run
+
+Frontend developer; no ROS required. PowerShell:
+
+```powershell
+$env:FLEETX_SIMULATION="true"; uv run backend/run.py
+```
+
+This is also default when flag is unset. Full Python simulation, A* pathing,
+tasks and dashboard controls remain active.
+
+Raspberry Pi live ROS mode, after one ROS workspace build:
+
+```bash
+bash backend/run_ros2.sh
+```
+
+Laptop:
+
+```powershell
+uv run frontend/run.py http://<PI-IP>:8000
 ```

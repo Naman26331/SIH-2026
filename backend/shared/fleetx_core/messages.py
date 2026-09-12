@@ -36,6 +36,7 @@ class MessageType(str, Enum):
     TASK_BID = "TASK_BID"
     TASK_CLAIM = "TASK_CLAIM"
     CENTRAL_COMMAND = "CENTRAL_COMMAND"
+    OPERATOR_GOAL = "OPERATOR_GOAL"
 
 
 @dataclass
@@ -266,6 +267,27 @@ class YieldRequest:
 
 
 @dataclass
+class OperatorGoal:
+    """Authenticated dashboard command addressed to one robot."""
+
+    robot_id: str                    # sender; normally OPERATOR
+    timestamp: float
+    seq: int
+    target_robot: str
+    target: Tuple[int, int]
+
+    type: str = field(default=MessageType.OPERATOR_GOAL.value, init=False)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": self.type, "robot_id": self.robot_id,
+            "timestamp": round(self.timestamp, 3), "seq": self.seq,
+            "target_robot": self.target_robot,
+            "target": [self.target[0], self.target[1]],
+        }
+
+
+@dataclass
 class BlockedAisle:
     """"There is something in the way here."
 
@@ -336,7 +358,8 @@ class TaskAnnounce:
             "task_id": self.task_id,
             "pickup": [self.pickup[0], self.pickup[1]],
             "dropoff": [self.dropoff[0], self.dropoff[1]],
-            "product": self.product, "priority": self.priority,
+            "product": self.product, "shelf": self.shelf,
+            "quantity": self.quantity, "priority": self.priority,
             "flexible": self.flexible,
         }
 
@@ -506,6 +529,7 @@ def from_dict(data: Dict[str, Any]):
             robot_id=data["robot_id"], timestamp=data["timestamp"], seq=data["seq"],
             task_id=data["task_id"], pickup=tuple(data["pickup"]),
             dropoff=tuple(data["dropoff"]), product=data.get("product", ""),
+            shelf=data.get("shelf", ""), quantity=data.get("quantity", 1),
             priority=data.get("priority", 5), flexible=data.get("flexible", False),
         )
     if kind == MessageType.TASK_BID.value:
@@ -526,5 +550,10 @@ def from_dict(data: Dict[str, Any]):
             dropoff=tuple(data["dropoff"]), product=data.get("product", ""),
             path=[tuple(c) for c in data.get("path", [])],
             sender=data.get("sender", "BOSS"),
+        )
+    if kind == MessageType.OPERATOR_GOAL.value:
+        return OperatorGoal(
+            robot_id=data["robot_id"], timestamp=data["timestamp"], seq=data["seq"],
+            target_robot=data["target_robot"], target=tuple(data["target"]),
         )
     raise ValueError(f"Unknown message type: {kind!r}")

@@ -26,6 +26,7 @@ setup(
         "console_scripts": [
             "agent = fleet_agent.agent_node:main",
             "order_source = fleet_agent.order_source:main",
+            "gateway = fleet_agent.gateway_node:main",
         ],
     },
 )

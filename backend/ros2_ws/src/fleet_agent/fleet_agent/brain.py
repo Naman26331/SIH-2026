@@ -46,14 +46,14 @@ BRAIN_PATH = add_brain_to_path()
 
 from fleetx_core import (  # noqa: E402  (must follow the sys.path fix)
     BlockedAisle, Cell, ConflictAlert, FleetBus, Grid, Heartbeat, IntentUpdate,
-    PathReservation, PoseUpdate, Robot, RobotStatus, TaskAnnounce, TaskBid,
+    OperatorGoal, PathReservation, PoseUpdate, Robot, RobotStatus, TaskAnnounce, TaskBid,
     TaskClaim, WaitReport, YieldRequest, default_grid,
 )
 
 __all__ = [
     "BRAIN_PATH", "add_brain_to_path",
     "BlockedAisle", "Cell", "ConflictAlert", "FleetBus", "Grid", "Heartbeat",
-    "IntentUpdate", "PathReservation", "PoseUpdate", "Robot", "RobotStatus",
+    "IntentUpdate", "OperatorGoal", "PathReservation", "PoseUpdate", "Robot", "RobotStatus",
     "TaskAnnounce", "TaskBid", "TaskClaim", "WaitReport", "YieldRequest",
     "default_grid",
 ]

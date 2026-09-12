@@ -102,12 +102,14 @@ ros2 topic list | grep fleet
 
 ```
 ros2_ws/src/
-├── fleet_msgs/          the eleven things robots say to each other
+├── fleet_msgs/          robot messages plus signed operator goal
 │   └── msg/*.msg        one per message class in the brain, same field names
 ├── fleet_agent/         one robot = one node
 │   ├── brain.py         finds shared/fleetx_core and imports it
 │   ├── translate.py     brain message <-> ROS 2 message, and squares <-> metres
 │   ├── ros2_bus.py      Ros2Bus(FleetBus) — the brain's socket, wired to DDS
+│   ├── telemetry.py     ROS-free, tested dashboard state projector
+│   ├── gateway_node.py  DDS ↔ backend adapter; no HTML
 │   ├── agent_node.py    odometry -> update_pose(), laser -> sense(), brain -> wheels
 │   ├── order_source.py  stands in for the warehouse order system
 │   └── launch/          one_robot.launch.py, fleet.launch.py
@@ -136,8 +138,9 @@ The names come from `03_ROBOT_AND_ROS2_IMPLEMENTATION.md` §3:
 | `/fleet/task_claims` | `TaskClaim` | claimed / picked up / delivered / released |
 | `/fleet/wait_reports` | `WaitReport` | "I am stuck behind X" — the wait-for graph |
 | `/fleet/yield_requests` | `YieldRequest` | "please move, you are in my way" |
+| `/fleet/operator_goals` | `OperatorGoal` | signed dashboard goal for one robot |
 
-The first seven are the ones named in the design docs. The last four are
+The first seven are the ones named in the design docs. The remaining messages are
 extensions the working system turned out to need — auctions, deadlock detection
 and asking a parked robot to shift are all things the docs describe in prose but
 never gave a message for.
@@ -221,9 +224,30 @@ around it is not. Expect an hour of small fixes. The likely candidates:
 6. **Message field names.** `.msg` files use flattened `int32[]` arrays for lists
    of squares, because ROS 2 has no array-of-pairs type. `translate.py` packs and
    unpacks them. If you add a field to a brain message, add it in both places.
-7. **Clock.** The brain wants seconds since start, as a float, and all robots
-   need roughly the same one. Each node uses its own ROS clock. On separate
-   machines, run NTP or `chrony`.
+7. **Clock.** Messages use shared ROS clock seconds. On separate machines, run
+   NTP or `chrony` so signature freshness and reservation windows agree.
+
+---
+
+## Live dashboard bridge
+
+On Raspberry Pi, after building and sourcing workspace:
+
+```bash
+bash backend/run_ros2.sh
+```
+
+This starts API only on port 8000 and listens to DDS. It does not serve HTML
+and never silently falls back to simulator mode.
+
+On laptop:
+
+```powershell
+uv run frontend/run.py http://<PI-IP>:8000
+```
+
+Open `http://localhost:3000`. Browser talks only to laptop frontend proxy;
+frontend proxy talks to Pi API.
 
 ---
 

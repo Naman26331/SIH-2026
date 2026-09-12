@@ -23,6 +23,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/TaskClaim.msg"
   "msg/WaitReport.msg"
   "msg/YieldRequest.msg"
+  "msg/OperatorGoal.msg"
   DEPENDENCIES builtin_interfaces
 )
 
