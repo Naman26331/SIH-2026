@@ -14,15 +14,8 @@ file is now wrong, and nobody told the robots.
             -> A* replanning
             -> reservation update
 
-    "Use TTL so temporary obstacles eventually expire."
-
-Why blocks must expire
-----------------------
-Somebody picks the box up. If a block never faded, the warehouse would carry a
-phantom wall for ever. Over a shift the map would silently fill with obstacles
-that are not there and throughput would quietly collapse.
-
-So: see it, and it is confirmed. Stop seeing it, and it fades.
+An obstacle stays blocked until a robot sees that exact square is clear or an
+operator removes it. Silence is not evidence that the obstacle disappeared.
 """
 
 from dataclasses import dataclass
@@ -30,8 +23,9 @@ from typing import Dict, Iterable, List, Optional, Set
 
 from .grid import Cell
 
-# How long a block survives without anybody confirming it again.
-DEFAULT_TTL = 20.0
+# Zero means permanent: an obstacle remains until a sensor or operator
+# explicitly confirms that its square is clear.
+DEFAULT_TTL = 0.0
 
 # How far a robot can see. Deliberately short: a robot has to GO somewhere to
 # find out what is there. If every robot magically knew the instant a box
@@ -50,9 +44,11 @@ class Block:
     confidence: float = 1.0
 
     def expired(self, now: float) -> bool:
-        return now - self.seen_at > self.ttl
+        return self.ttl > 0.0 and now - self.seen_at > self.ttl
 
-    def remaining(self, now: float) -> float:
+    def remaining(self, now: float) -> Optional[float]:
+        if self.ttl <= 0.0:
+            return None
         return max(0.0, self.ttl - (now - self.seen_at))
 
     def to_dict(self, now: float) -> Dict[str, object]:
@@ -60,7 +56,8 @@ class Block:
             "cell": [self.cell.x, self.cell.y],
             "reported_by": self.reported_by,
             "confidence": round(self.confidence, 2),
-            "remaining": round(self.remaining(now), 1),
+            "remaining": (round(self.remaining(now), 1)
+                          if self.remaining(now) is not None else None),
         }
 
 
@@ -121,7 +118,7 @@ class BlockedMap:
 
     def to_rows(self, now: float) -> List[Dict[str, object]]:
         return [b.to_dict(now) for b in
-                sorted(self._blocks.values(), key=lambda b: -b.remaining(now))
+                sorted(self._blocks.values(), key=lambda b: -b.seen_at)
                 if not b.expired(now)]
 
     def __len__(self) -> int:

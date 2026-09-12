@@ -214,11 +214,20 @@ class TaskBoard:
 
     def __init__(self) -> None:
         self.tasks: Dict[str, Task] = {}
+        # Completed jobs are retained only briefly for the dashboard. Their
+        # totals live here afterwards, so runtime cost stays flat during long
+        # simulations instead of growing with every order ever completed.
+        self._archived_ids: set = set()
+        self._archived_done = 0
+        self._archived_reassigned = 0
+        self._archived_task_time = 0.0
 
     def add(self, task: Task) -> Task:
         existing = self.tasks.get(task.task_id)
         if existing is not None:
             return existing
+        if task.task_id in self._archived_ids:
+            return task                 # late duplicate; DONE is terminal
         self.tasks[task.task_id] = task
         return task
 
@@ -247,22 +256,41 @@ class TaskBoard:
 
     # ---------------------------------------------------------------- stats
 
+    def archive_finished(self, keep: int = 24) -> None:
+        """Keep only the newest few DONE jobs; preserve their KPI totals."""
+        done = sorted(
+            (t for t in self.tasks.values() if t.finished),
+            key=lambda t: t.done_at if t.done_at is not None else -1.0,
+            reverse=True,
+        )
+        for task in done[max(0, keep):]:
+            self._archived_ids.add(task.task_id)
+            self._archived_done += 1
+            self._archived_reassigned += task.reassignments
+            duration = task.duration()
+            if duration is not None:
+                self._archived_task_time += duration
+            del self.tasks[task.task_id]
+
     def stats(self, now: float) -> Dict[str, object]:
         tasks = list(self.tasks.values())
         done = [t for t in tasks if t.finished]
         durations = [t.duration() for t in done if t.duration() is not None]
-        avg = sum(durations) / len(durations) if durations else 0.0
-        per_hour = (len(done) / now * 3600.0) if now > 0 else 0.0
+        done_count = self._archived_done + len(done)
+        total_time = self._archived_task_time + sum(durations)
+        avg = total_time / done_count if done_count else 0.0
+        per_hour = (done_count / now * 3600.0) if now > 0 else 0.0
         return {
-            "created": len(tasks),
-            "done": len(done),
+            "created": self._archived_done + len(tasks),
+            "done": done_count,
             "queued": sum(1 for t in tasks if t.open_for_bids),
             "active": sum(1 for t in tasks
                           if t.status in (TaskStatus.ASSIGNED, TaskStatus.CARRYING)),
-            "reassigned": sum(t.reassignments for t in tasks),
+            "reassigned": (self._archived_reassigned
+                           + sum(t.reassignments for t in tasks)),
             "avg_task_time": round(avg, 1),
             "tasks_per_hour": round(per_hour, 1),
-            "total_task_time": round(sum(durations), 1),
+            "total_task_time": round(total_time, 1),
         }
 
     def rows(self, limit: int = 12) -> List[Dict[str, object]]:
@@ -274,7 +302,8 @@ class TaskBoard:
         return [t.to_dict() for t in ranked[:limit]]
 
     def all_done(self) -> bool:
-        return bool(self.tasks) and all(t.finished for t in self.tasks.values())
+        return bool(self.tasks or self._archived_done) and all(
+            t.finished for t in self.tasks.values())
 
     def __len__(self) -> int:
-        return len(self.tasks)
+        return self._archived_done + len(self.tasks)

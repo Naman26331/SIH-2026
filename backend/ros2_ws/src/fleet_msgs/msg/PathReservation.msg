@@ -11,7 +11,7 @@ uint32 seq
 string tag                  # Phase 23: HMAC signature -- see security.py
 
 string action               # CLAIM or RELEASE
-string kind                 # NODE or EDGE
+string kind                 # NODE, EDGE or TARGET
 int32[] cells               # flattened x,y pairs: one square, or an edge's two ends
 float64 start               # absolute times, not "seconds from now"
 float64 end

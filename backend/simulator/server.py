@@ -7,7 +7,7 @@ No pip install. No npm install.
 
 Three things it serves:
   GET  /api/map       the warehouse map (sent once, it never changes)
-  GET  /api/stream    a live feed of the fleet, ~20 updates a second
+  GET  /api/stream    one full state, then compact live deltas
   POST /api/goal      "robot R1, go to square (x, y)"
 """
 
@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Optional
+from typing import Any, Dict, Optional, Tuple
 
 # Import the backend brain.
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -61,7 +61,102 @@ def _build_stamp() -> str:
 SERVER_BUILD = _build_stamp()
 
 TICK_HZ = 20.0            # how many times a second the world moves
-STREAM_HZ = 20.0          # how many times a second the browser is updated
+STREAM_HZ = 10.0          # enough for smooth dashboard motion
+PANEL_HZ = 2.0            # tasks/events humans read, not animation data
+SLOW_HZ = 1.0             # KPIs, network counters and demand summaries
+
+_NO_CHANGE = object()
+_KEYED_LISTS = {
+    "robots": "robot_id",
+    "tasks": "task_id",
+    "humans": "human_id",
+    "neighbours": "robot_id",
+}
+_PANEL_KEYS = {
+    "tasks", "messages", "decisions", "wait_graph", "stuck", "reslotting",
+}
+_SLOW_KEYS = {
+    "kpis", "bus", "demand", "build", "server_build", "scenario",
+    "order_every", "auto", "orders_running",
+}
+
+# Multiple tabs used to rebuild and encode the same expensive world snapshot
+# independently. Cache one immutable snapshot for most of one stream interval.
+_STREAM_CACHE_LOCK = threading.Lock()
+_STREAM_CACHE: Dict[Tuple[int, str], Tuple[float, dict]] = {}
+
+
+def _stream_snapshot(source) -> dict:
+    owner = getattr(source, "__self__", source)
+    key = (id(owner), getattr(source, "__name__", "snapshot"))
+    now = time.perf_counter()
+    with _STREAM_CACHE_LOCK:
+        cached = _STREAM_CACHE.get(key)
+        if cached is not None and now - cached[0] < 0.8 / TICK_HZ:
+            return cached[1]
+        value = source()
+        _STREAM_CACHE[key] = (now, value)
+        return value
+
+
+def _delta(old: Any, new: Any, path: Tuple[str, ...] = ()) -> Any:
+    """Small recursive merge patch; large entity lists update by stable ID."""
+    if old == new:
+        return _NO_CHANGE
+
+    if isinstance(old, dict) and isinstance(new, dict):
+        patch: Dict[str, Any] = {}
+        removed = [key for key in old if key not in new]
+        if removed:
+            patch["$delete"] = removed
+        for key, value in new.items():
+            if key not in old:
+                patch[key] = value
+                continue
+            change = _delta(old[key], value, path + (key,))
+            if change is not _NO_CHANGE:
+                patch[key] = change
+        return patch if patch else _NO_CHANGE
+
+    list_name = path[-1] if path else ""
+    identity = _KEYED_LISTS.get(list_name)
+    if (identity and isinstance(old, list) and isinstance(new, list)
+            and all(isinstance(row, dict) and identity in row
+                    for row in old + new)):
+        old_by_id = {row[identity]: row for row in old}
+        new_by_id = {row[identity]: row for row in new}
+        upserts = []
+        for item_id, row in new_by_id.items():
+            if item_id not in old_by_id:
+                upserts.append(row)
+                continue
+            change = _delta(old_by_id[item_id], row, path + (str(item_id),))
+            if change is not _NO_CHANGE:
+                change[identity] = item_id
+                upserts.append(change)
+        removed = [item_id for item_id in old_by_id if item_id not in new_by_id]
+        old_order = [row[identity] for row in old]
+        new_order = [row[identity] for row in new]
+        patch = {"$list": "keyed", "key": identity}
+        if upserts:
+            patch["upsert"] = upserts
+        if removed:
+            patch["remove"] = removed
+        if old_order != new_order:
+            patch["order"] = new_order
+        return patch if len(patch) > 2 else _NO_CHANGE
+
+    # Small coordinate/path/event arrays are replaced only when changed.
+    return new
+
+
+def _at_rate(current: dict, sent: dict, include: set) -> dict:
+    """Hold selected top-level fields at their last sent value."""
+    projected = dict(current)
+    for key in include:
+        if key in sent:
+            projected[key] = sent[key]
+    return projected
 
 
 class ComparisonRunner:
@@ -400,13 +495,15 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "message": "Comparison simulator disabled in ROS 2 mode."},
                                 status=409)
             else:
-                self._send_stream(self.compare.snapshot)
+                self._send_stream(self.compare.snapshot, deltas=False,
+                                  hz=TICK_HZ)
         elif self.path == "/api/map":
             self._send_json(self.sim.map_data())
         elif self.path == "/api/state":
             self._send_json(self.sim.snapshot())
         elif self.path == "/api/stream":
-            self._send_stream(self.sim.snapshot)
+            self._send_stream(self.sim.snapshot, deltas=True,
+                              hz=STREAM_HZ)
         else:
             self._send_json({"error": "not found"}, status=404)
 
@@ -500,25 +597,60 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_stream(self, source):
-        """Server-Sent Events: keep the line open and keep talking.
-
-        The browser side of this is one line of JavaScript: new EventSource().
-        Both ends are built in, so nothing needs installing.
-        """
+    def _send_stream(self, source, *, deltas: bool, hz: float):
+        """SSE stream: full bootstrap, then entity-level merge patches."""
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-store")
         self.send_header("Connection", "keep-alive")
         self.end_headers()
 
-        interval = 1.0 / STREAM_HZ
+        interval = 1.0 / hz
         try:
+            if not deltas:
+                while True:
+                    payload = json.dumps(
+                        _stream_snapshot(source), separators=(",", ":"))
+                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+                    time.sleep(interval)
+
+            sent = _stream_snapshot(source)
+            payload = json.dumps(
+                {"stream": "full", "state": sent}, separators=(",", ":"))
+            self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+            self.wfile.flush()
+
+            next_panel = time.perf_counter() + 1.0 / PANEL_HZ
+            next_slow = time.perf_counter() + 1.0 / SLOW_HZ
             while True:
-                payload = json.dumps(source())
+                time.sleep(interval)
+                current = _stream_snapshot(source)
+                now = time.perf_counter()
+
+                # Motion/safety stays at 10 Hz. Text panels update at 2 Hz;
+                # aggregate counters at 1 Hz. Unsent values remain in `sent`,
+                # so their eventual patch is measured from browser state.
+                held = set()
+                if now < next_panel:
+                    held.update(_PANEL_KEYS)
+                else:
+                    next_panel = now + 1.0 / PANEL_HZ
+                if now < next_slow:
+                    held.update(_SLOW_KEYS)
+                else:
+                    next_slow = now + 1.0 / SLOW_HZ
+                projected = _at_rate(current, sent, held)
+                patch = _delta(sent, projected)
+                if patch is _NO_CHANGE:
+                    continue
+                sent = projected
+                payload = json.dumps(
+                    {"stream": "delta", "patch": patch},
+                    separators=(",", ":"),
+                )
                 self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
                 self.wfile.flush()
-                time.sleep(interval)
         except (BrokenPipeError, ConnectionResetError, OSError):
             # The tab was closed or refreshed. Normal, not an error.
             return

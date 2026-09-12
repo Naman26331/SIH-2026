@@ -19,6 +19,7 @@ from fleetx_core import (  # noqa: E402
     IntentUpdate, PathReservation, PoseUpdate, Reservation, ReservationTable,
     Robot, RobotStatus, Task, TaskAnnounce, TaskBid, TaskClaim, TaskStatus,
     WaitForGraph, WaitReport, Waiting, World, YieldRequest, edge_key, node_key,
+    target_key,
 )
 from fleetx_core import security  # noqa: E402
 
@@ -171,7 +172,7 @@ class TelemetryProjector:
                     self._blocked.clear(cell)
                 else:
                     self._blocked.mark(cell, message.robot_id, now,
-                                       ttl=message.ttl, confidence=message.confidence)
+                                       ttl=0.0, confidence=message.confidence)
 
             elif isinstance(message, WaitReport):
                 robot = self._ensure_robot(message.robot_id)
@@ -211,6 +212,8 @@ class TelemetryProjector:
         cells = [Cell(*pair) for pair in message.cells]
         if message.kind == "NODE" and cells:
             resource = node_key(cells[0])
+        elif message.kind == "TARGET" and cells:
+            resource = target_key(cells[0])
         elif message.kind == "EDGE" and len(cells) >= 2:
             resource = edge_key(cells[0], cells[1])
         else:

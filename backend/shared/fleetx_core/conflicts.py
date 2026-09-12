@@ -151,8 +151,12 @@ def build_plan(
         windows.append(Window(node, max(0.0, enter - clearance), leave + clearance))
 
         prev = chain[i]
-        edge_start = shifted[i - 1] if i > 0 else 0.0
-        edges.append(EdgeWindow(prev, node, max(0.0, edge_start - clearance), enter + clearance))
+        if prev != node:
+            edge_start = shifted[i - 1] if i > 0 else 0.0
+            edges.append(EdgeWindow(
+                prev, node, max(0.0, edge_start - clearance),
+                enter + clearance,
+            ))
 
     return Plan(robot_id, windows, edges)
 

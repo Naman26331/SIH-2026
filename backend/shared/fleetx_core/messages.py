@@ -184,14 +184,14 @@ class PathReservation:
     into their own copy of the reservation table. Nobody grants it -- ownership
     is worked out separately, by a rule every robot applies identically.
 
-    cells holds one square for a NODE booking, or the two ends for an EDGE.
+    cells holds one square for a NODE/TARGET booking, or two ends for an EDGE.
     """
 
     robot_id: str
     timestamp: float
     seq: int
     action: str                      # CLAIM or RELEASE
-    kind: str                        # NODE or EDGE
+    kind: str                        # NODE, EDGE or TARGET
     cells: List[Tuple[int, int]]
     start: float                     # absolute time, not "seconds from now"
     end: float
@@ -291,14 +291,9 @@ class OperatorGoal:
 class BlockedAisle:
     """"There is something in the way here."
 
-    04_DECENTRALIZED_FLEET_PROTOCOL section 2 spells this one out, ttl and all:
-
-        {"type": "BLOCKED_AISLE", "aisle": "A07", "confidence": 0.96, "ttl": 15}
-
-    We name the exact square rather than an aisle, because our warehouse is a
-    grid. ttl is how long the block should be believed without anybody seeing
-    it again -- boxes get picked up, and a block that never faded would leave a
-    phantom wall in everyone's map for ever.
+    The exact square remains blocked until a later message explicitly says
+    ``cleared=True``. ``ttl`` remains on the wire for protocol compatibility;
+    zero means it does not expire automatically.
     """
 
     robot_id: str
@@ -306,7 +301,7 @@ class BlockedAisle:
     seq: int
     cell: Tuple[int, int]
     confidence: float = 1.0
-    ttl: float = 20.0
+    ttl: float = 0.0
     cleared: bool = False        # True = "I looked, and it is gone"
 
     type: str = field(default=MessageType.BLOCKED_AISLE.value, init=False)
@@ -522,7 +517,7 @@ def from_dict(data: Dict[str, Any]):
         return BlockedAisle(
             robot_id=data["robot_id"], timestamp=data["timestamp"], seq=data["seq"],
             cell=tuple(data["cell"]), confidence=data.get("confidence", 1.0),
-            ttl=data.get("ttl", 20.0), cleared=data.get("cleared", False),
+            ttl=data.get("ttl", 0.0), cleared=data.get("cleared", False),
         )
     if kind == MessageType.TASK_ANNOUNCE.value:
         return TaskAnnounce(

@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, Iterable, List, Optional
 
-from .astar import find_path
+from .astar import find_space_time_path
 from .conflicts import (DEFAULT_CLEARANCE, DEFAULT_HORIZON, Conflict, Plan,
                         build_plan, find_conflicts)
 from .deadlock import STUCK_SECONDS, WaitForGraph, Waiting, choose_victim
@@ -43,7 +43,8 @@ from .tasks import (BID_WINDOW, CLAIM_TIMEOUT, Task, TaskBoard, TaskStatus,
 from .priority import (BASE_PRIORITY, SCALE, effective_priority,
                        next_wait_credit, quantise, yields_to)
 from .reservations import (DEFAULT_LOOKAHEAD, OCCUPANCY_PRIORITY, Reservation,
-                           ReservationTable, avoidance_cost, edge_key, node_key)
+                           ReservationTable, avoidance_cost, edge_key, node_key,
+                           target_key)
 
 
 class RobotStatus(str, Enum):
@@ -125,7 +126,9 @@ class Robot:
     prepositions: int = 0
     _last_preposition_at: float = -99.0
 
-    charger: Optional[Cell] = None    # the bay we have booked and are driving to
+    charger: Optional[Cell] = None    # the bay assigned to us
+    # None with a charger means we are queued for that occupied bay. Once it
+    # becomes free this becomes the slot we own; the charger itself stays fixed.
     _charge_slot: Optional[tuple] = None
     _charge_checked_at: float = -99.0
     _charge_wanted: bool = False
@@ -297,6 +300,17 @@ class Robot:
 
     # -------------------------------------------------------------- think
 
+    def plan_path(self, grid: Grid, start: Cell, goal: Cell, now: float,
+                  cost_fn: Optional[Callable] = None,
+                  blocked: Optional[set] = None) -> Optional[List[Cell]]:
+        """The one bounded space-time planner used by every robot journey."""
+        return find_space_time_path(
+            grid, start, goal, table=self.table, robot_id=self.robot_id,
+            now=now, speed=self.travel_speed(), cost_fn=cost_fn,
+            blocked=blocked if blocked is not None else self.blocked_map.cells(now),
+            clearance=self.CLEARANCE,
+        )
+
     def decide(self, grid: Grid, cost_fn: Optional[Callable] = None,
                now: float = 0.0, traffic_aware: bool = True) -> None:
         """Work out what to do next. BOTH the simulator and ROS 2 call this.
@@ -397,8 +411,7 @@ class Robot:
                 occupied=self.known_occupied(now),
             )
 
-        route = find_path(grid, self.cell, self.goal, route_cost,
-                          blocked=self.blocked_map.cells(now))
+        route = self.plan_path(grid, self.cell, self.goal, now, route_cost)
         if route is None:
             # No way through. Sit still rather than guess.
             self.status = RobotStatus.BLOCKED
@@ -499,12 +512,14 @@ class Robot:
         while self._progress >= 1.0 and self.path:
             self._progress -= 1.0
             nxt = self.path.pop(0)
+            waited = nxt == self.cell
             direction = _heading(self.cell, nxt)
             if direction:
                 self.heading = direction
             self.cell = nxt
-            self.steps += 1
-            self.distance += 1.0
+            if not waited:
+                self.steps += 1
+                self.distance += 1.0
             if self.hold and self.path:
                 self._progress = 0.0
                 break
@@ -635,7 +650,7 @@ class Robot:
         squares it was not moving into. Two stopped robots would then block each
         other forever over a square neither was going to enter.
         """
-        if self.halted or self.hold or not self.path:
+        if self.halted or self.hold or not self.path or self.path[0] == self.cell:
             return 0.0
         if self.status in (RobotStatus.FAILED, RobotStatus.IDLE,
                            RobotStatus.WAITING, RobotStatus.CHARGING):
@@ -982,11 +997,13 @@ class Robot:
     DRAIN_MOVING = 0.35               # percent per second while driving
     DRAIN_IDLE = 0.05                 # percent per second just sitting there
     CHARGE_RATE = 4.0                 # percent per second on a charger
-    CHARGE_UNTIL = 95.0               # top up to here, then back to work
+    CHARGE_UNTIL = 100.0              # once charging, fill completely
+    CHARGE_BELOW = 15.0               # working robot: emergency charge threshold
+    IDLE_CHARGE_AT = 80.0             # idle robot may top up at/below this
     BATTERY_RESERVE = 15.0            # must still have this on reaching a bay
-    BATTERY_MINIMUM = 6.0             # a robot already carrying is more stubborn
     BATTERY_BAND = 5.0                # agreement bucket, see charge_urgency
     CHARGE_RECHECK = 2.0              # seconds between re-doing the sums
+    TARGET_LEASE_SECONDS = 8.0        # renewed while pickup/drop/charger is wanted
 
     LOOKAHEAD = DEFAULT_LOOKAHEAD     # how many squares ahead to book
     CLEARANCE = 0.35                  # a little clear time either side
@@ -1000,7 +1017,12 @@ class Robot:
         if not isinstance(message, PathReservation):
             return
         cells = [Cell(c[0], c[1]) for c in message.cells]
-        key = node_key(cells[0]) if message.kind == "NODE" else edge_key(cells[0], cells[1])
+        if message.kind == "NODE":
+            key = node_key(cells[0])
+        elif message.kind == "TARGET":
+            key = target_key(cells[0])
+        else:
+            key = edge_key(cells[0], cells[1])
         if message.action == "RELEASE":
             self.table.release(message.robot_id, key)
         else:
@@ -1008,6 +1030,15 @@ class Robot:
                 robot_id=message.robot_id, resource=key,
                 start=message.start, end=message.end, priority=message.priority,
             ))
+
+    def _goal_needs_lease(self) -> bool:
+        """Pickup, drop-off and charger targets must have one owner."""
+        if self.goal is None:
+            return False
+        if self.charger == self.goal:
+            return True
+        return (self.task is not None
+                and self.goal in (self.task.pickup, self.task.dropoff))
 
     def _wanted_slots(self, now: float) -> Dict[tuple, tuple]:
         """Which squares and aisle segments this robot needs, and for how long.
@@ -1045,20 +1076,49 @@ class Robot:
             node = self.path[i]
             enter = now + etas[i] - self.CLEARANCE
             leave = now + (etas[i + 1] if i + 1 < len(etas) else etas[i] + dwell) + self.CLEARANCE
+            prev = chain[i]
+            if node == prev:
+                # A space-time WAIT occupies the same square for another time
+                # step. Keep one continuous physical-occupancy claim; there is
+                # no traversed edge to reserve.
+                key = node_key(node)
+                old = wanted.get(key)
+                wanted[key] = (
+                    min(old[0], enter) if old else enter,
+                    max(old[1], leave) if old else leave,
+                    OCCUPANCY_PRIORITY,
+                )
+                continue
             wanted[node_key(node)] = (enter, leave, self.priority)
             # the aisle segment used to get there -- booked in BOTH directions,
             # which is what stops a head-on
-            prev = chain[i]
             edge_start = now + (etas[i - 1] if i > 0 else 0.0) - self.CLEARANCE
             wanted[edge_key(prev, node)] = (edge_start, now + etas[i] + self.CLEARANCE,
                                             self.priority)
+
+        # Pickup, drop-off and charger destinations get a renewable exclusive
+        # lease. It naturally expires if this robot fails or changes goal.
+        if self._goal_needs_lease():
+            eta = etas[-1] if etas else 0.0
+            lease_end = now + max(self.TARGET_LEASE_SECONDS, eta + dwell)
+            lease_priority = (self.charge_urgency()
+                              if self.charger == self.goal else self.priority)
+            wanted[target_key(self.goal)] = (
+                now - self.CLEARANCE, lease_end + self.CLEARANCE,
+                lease_priority,
+            )
 
         # Phase 13: the charging bay we have booked, held for the whole trip
         # plus the top-up. Same table, same rules, same broadcast as any other
         # square -- a bay is just a square somebody wants.
         if self.charger is not None and self._charge_slot is not None:
             start, end = self._charge_slot
-            wanted[node_key(self.charger)] = (start, end, self.charge_urgency())
+            key = node_key(self.charger)
+            # Once we are physically on the bay, keep the unbeatable occupancy
+            # claim above. Replacing it with charge urgency made an occupied bay
+            # look available to a robot with a lower battery.
+            if key not in wanted:
+                wanted[key] = (start, end, self.charge_urgency())
         return wanted
 
     def reserve_ahead(self, bus, now: float) -> None:
@@ -1157,8 +1217,9 @@ class Robot:
     def _broadcast_reservation(self, bus, now: float, action: str, res: Reservation) -> None:
         if bus is None:
             return
-        if res.resource[0] == "N":
-            kind, cells = "NODE", [(res.resource[1], res.resource[2])]
+        if res.resource[0] in ("N", "T"):
+            kind = "NODE" if res.resource[0] == "N" else "TARGET"
+            cells = [(res.resource[1], res.resource[2])]
         else:
             kind = "EDGE"
             cells = [(res.resource[1], res.resource[2]), (res.resource[3], res.resource[4])]
@@ -1207,10 +1268,15 @@ class Robot:
         if self._local_safety_says_stop(nxt, now, dt):
             return
 
-        checks = [
-            (node_key(nxt), self._claimed.get(node_key(nxt))),
-            (edge_key(self.cell, nxt), self._claimed.get(edge_key(self.cell, nxt))),
-        ]
+        # WAIT is a timed occupation of the current square, not traversal of a
+        # zero-length edge. Requiring a fake self-edge would stop every wait.
+        checks = [(node_key(nxt), self._claimed.get(node_key(nxt)))]
+        if nxt != self.cell:
+            checks.append((edge_key(self.cell, nxt),
+                           self._claimed.get(edge_key(self.cell, nxt))))
+        if nxt == self.goal and self._goal_needs_lease():
+            checks.append((target_key(nxt),
+                           self._claimed.get(target_key(nxt))))
         for key, mine in checks:
             if mine is None:
                 # Safety invariant: booking failure must stop motion, not
@@ -1543,8 +1609,10 @@ class Robot:
             self.table, self.robot_id, now,
             avoid_robot=self.blocked_by, occupied=occupied,
         )
-        alternative = find_path(grid, start, self.goal, cost_fn,
-                                blocked=self.blocked_map.cells(now))
+        alternative = self.plan_path(
+            grid, start, self.goal, now, cost_fn,
+            blocked=self.blocked_map.cells(now),
+        )
 
         if alternative is None or len(alternative) < 2:
             self.last_decision = f"{self.robot_id} waits - no way round"
@@ -1722,8 +1790,10 @@ class Robot:
 
     def _distance_to(self, grid: Grid, cell: Cell, now: float,
                      start: Optional[Cell] = None) -> Optional[float]:
-        leg = find_path(grid, start or self.cell, cell,
-                        blocked=self.blocked_map.cells(now))
+        leg = self.plan_path(
+            grid, start or self.cell, cell, now,
+            blocked=self.blocked_map.cells(now),
+        )
         return None if leg is None else float(len(leg) - 1)
 
     def _nearest_shelf_name(self, spot: Cell, inventory) -> str:
@@ -2095,7 +2165,7 @@ class Robot:
         blocked = self.blocked_map.cells(now)
         best, best_cost = None, float("inf")
         for bay in bays:
-            route = find_path(grid, self.cell, bay, blocked=blocked)
+            route = self.plan_path(grid, self.cell, bay, now, blocked=blocked)
             if route is None:
                 continue
             cost = (len(route) - 1) + self.BAY_BUSY_PENALTY * busy.get(bay, 0)
@@ -2106,10 +2176,16 @@ class Robot:
     def cost_of(self, task: Task, grid: Grid, now: float) -> Optional[float]:
         """What this job would cost us. None if we simply cannot reach it."""
         blocked = self.blocked_map.cells(now)
-        to_pickup = find_path(grid, self.cell, task.pickup, blocked=blocked)
+        to_pickup = self.plan_path(
+            grid, self.cell, task.pickup, now, blocked=blocked,
+        )
         if to_pickup is None:
             return None
-        leg = find_path(grid, task.pickup, task.dropoff, blocked=blocked)
+        pickup_eta = now + ((len(to_pickup) - 1)
+                            / max(self.travel_speed(), 0.1))
+        leg = self.plan_path(
+            grid, task.pickup, task.dropoff, pickup_eta, blocked=blocked,
+        )
         if leg is None:
             return None
         # Phase 13. The question asked in the right place: at the auction.
@@ -2410,7 +2486,8 @@ class Robot:
             self.blocked_map.clear(cell)
         else:
             self.blocked_map.mark(cell, message.robot_id, now,
-                                  ttl=message.ttl, confidence=message.confidence)
+                                  ttl=DEFAULT_TTL,
+                                  confidence=message.confidence)
 
     def sense(self, blocked_now: Iterable[Cell], clear_now: Iterable[Cell],
               now: float) -> List[str]:
@@ -2442,9 +2519,10 @@ class Robot:
                 news.append(f"{self.robot_id} sees ({cell.x}, {cell.y}) is "
                             f"clear again - telling the fleet")
 
-        for cell in self.blocked_map.expire(now):
-            news.append(f"block on ({cell.x}, {cell.y}) expired - "
-                        f"nobody has seen it lately")
+        # Permanent obstacles do not disappear merely because nobody has
+        # revisited the aisle. Finite-lived safety blocks (for example a
+        # moving person) may still expire through this shared map.
+        self.blocked_map.expire(now)
 
         return news
 
@@ -2669,22 +2747,24 @@ class Robot:
         empty = max(0.0, 100.0 - self.battery)
         return int(empty / self.BATTERY_BAND) * SCALE
 
-    def _walk(self, grid: Grid, blocked, start: Cell, stops) -> Optional[float]:
+    def _walk(self, grid: Grid, blocked, start: Cell, stops,
+              now: float) -> Optional[float]:
         """Squares driven going from start through each stop in turn."""
         total, here = 0.0, start
         for stop in stops:
-            leg = find_path(grid, here, stop, blocked=blocked)
+            leg = self.plan_path(grid, here, stop, now, blocked=blocked)
             if leg is None:
                 return None
             total += len(leg) - 1
+            now += (len(leg) - 1) / max(self.travel_speed(), 0.1)
             here = stop
         return total
 
-    def _nearest_charger(self, grid: Grid, blocked, start: Cell):
+    def _nearest_charger(self, grid: Grid, blocked, start: Cell, now: float):
         """(squares, cell) of the closest charging bay, ignoring who booked it."""
         best = None
         for bay in grid.cells_of_kind(CellKind.CHARGER):
-            leg = find_path(grid, start, bay, blocked=blocked)
+            leg = self.plan_path(grid, start, bay, now, blocked=blocked)
             if leg is None:
                 continue
             if best is None or len(leg) - 1 < best[0]:
@@ -2700,79 +2780,73 @@ class Robot:
         bay, do I still arrive with something in hand?"
         """
         blocked = self.blocked_map.cells(now)
-        work = self._walk(grid, blocked, self.cell, stops)
+        work = self._walk(grid, blocked, self.cell, stops, now)
         if work is None:
             return False
         end = stops[-1] if stops else self.cell
-        bay = self._nearest_charger(grid, blocked, end)
+        arrival = now + work / max(self.travel_speed(), 0.1)
+        bay = self._nearest_charger(grid, blocked, end, arrival)
         if bay is None:
             return True                # no chargers on this map, carry on
         need = (work + bay[0]) * self.percent_per_square() + self.BATTERY_RESERVE
         return self.battery >= need
 
     def _should_charge(self, grid: Grid, now: float) -> bool:
-        """Worked out at most every couple of seconds -- it costs a few route
-        searches, and the answer does not change between ticks."""
+        """Use separate working and idle thresholds with hysteresis."""
         if now - self._charge_checked_at < self.CHARGE_RECHECK:
             return self._charge_wanted
         self._charge_checked_at = now
 
-        if self.task is not None and self.task.status is TaskStatus.CARRYING:
-            # Holding a parcel. Deliver it if we possibly can -- dropping a box
-            # in an aisle to go and charge is worse than arriving low. Divert
-            # only if we genuinely cannot make it, which the check when we took
-            # the job was meant to prevent ever happening.
-            blocked = self.blocked_map.cells(now)
-            work = self._walk(grid, blocked, self.cell, [self.task.dropoff])
-            bay = (self._nearest_charger(grid, blocked, self.task.dropoff)
-                   if work is not None else None)
-            if work is None or bay is None:
-                self._charge_wanted = False
-            else:
-                need = ((work + bay[0]) * self.percent_per_square()
-                        + self.BATTERY_MINIMUM)
-                self._charge_wanted = self.battery < need
+        # Any robot below 15% must charge, including one carrying a parcel.
+        if self.battery < self.CHARGE_BELOW:
+            self._charge_wanted = True
+            return True
+
+        # A genuinely idle robot may use spare charger capacity, but above 80%
+        # it stays available for work instead of repeatedly topping itself up.
+        if (self.task is None and self.goal is None
+                and self.status is RobotStatus.IDLE):
+            self._charge_wanted = self.battery <= self.IDLE_CHARGE_AT
             return self._charge_wanted
 
-        stops = []
-        if self.task is not None:
-            stops = [self.task.pickup, self.task.dropoff]
-        self._charge_wanted = not self.can_finish_and_still_reach_a_charger(
-            grid, now, stops)
-        return self._charge_wanted
+        self._charge_wanted = False
+        return False
 
     def _book_charger(self, grid: Grid, bus, now: float) -> Optional[str]:
-        """Claim a bay in the ordinary booking table, then drive to it.
-
-        Nothing new is invented here: a charging bay is a square, and squares
-        are booked for a window of time by whoever ranks highest. Because the
-        priority we book with is our urgency, the emptiest robot wins the bay
-        and everyone else keeps working and asks again in a moment. That is
-        what stops all twenty setting off for the chargers together.
-        """
+        """Take the nearest free bay, or keep one fixed queue assignment."""
         blocked = self.blocked_map.cells(now)
+        occupied = set(self.known_occupied(now))
         top_up = max(0.0, self.CHARGE_UNTIL - self.battery) / self.CHARGE_RATE
-        urgency = self.charge_urgency()
-        best = None
+        free_best = None
+        queue_best = None
         for bay in grid.cells_of_kind(CellKind.CHARGER):
-            leg = find_path(grid, self.cell, bay, blocked=blocked)
+            leg = self.plan_path(grid, self.cell, bay, now, blocked=blocked)
             if leg is None:
                 continue
             squares = len(leg) - 1
             travel = squares / max(self.travel_speed(), 0.1)
             start, end = now, now + travel + top_up + self.CLEARANCE
             key = node_key(bay)
-            mine = Reservation(robot_id=self.robot_id, resource=key,
-                               start=start, end=end, priority=urgency)
             owner = self.table.owner(key, start, end)
-            if (owner is not None and owner.robot_id != self.robot_id
-                    and owner.rank <= mine.rank):
-                continue               # somebody emptier got there first
-            if best is None or squares < best[0]:
-                best = (squares, bay, start, end)
+            lease_owner = self.table.owner(target_key(bay), start, end)
+            taken = ((bay != self.cell and bay in occupied)
+                     or (owner is not None and owner.robot_id != self.robot_id)
+                     or (lease_owner is not None
+                         and lease_owner.robot_id != self.robot_id))
+            candidate = (squares, bay, start, end)
+            if taken:
+                if queue_best is None or squares < queue_best[0]:
+                    queue_best = candidate
+            elif free_best is None or squares < free_best[0]:
+                free_best = candidate
 
+        # Free always wins, even when an occupied charger is closer. If every
+        # bay is taken, remember one queue assignment and do not reconsider a
+        # different charger every tick.
+        best = free_best or queue_best
         if best is None:
-            return None                # every bay spoken for; carry on working
+            return None
+        queued = free_best is None
 
         squares, bay, start, end = best
         # Not picked up yet? Put the job back so somebody with charge takes it.
@@ -2786,11 +2860,12 @@ class Robot:
                     task_id=handed_back, action="RELEASE"))
 
         self.charger = bay
-        self._charge_slot = (start, end)
+        self._charge_slot = None if queued else (start, end)
         self.staging = None
         self.staging_why = ""
         self.set_goal(bay)
-        return (f"{self.robot_id} is low ({self.battery:.0f}%) -> charging bay "
+        action = "queued for" if queued else "-> charging bay"
+        return (f"{self.robot_id} is low ({self.battery:.0f}%) {action} "
                 f"({bay.x}, {bay.y})"
                 + (f", gave {handed_back} back" if handed_back else ""))
 
@@ -2801,11 +2876,11 @@ class Robot:
         self._charge_checked_at = -99.0
         self._charge_wanted = False
         if bay is not None:
-            key = node_key(bay)
-            self.table.release(self.robot_id, key)
-            old = self._claimed.pop(key, None)
-            if old is not None:
-                self._broadcast_reservation(bus, now, "RELEASE", old)
+            for key in (node_key(bay), target_key(bay)):
+                self.table.release(self.robot_id, key)
+                old = self._claimed.pop(key, None)
+                if old is not None:
+                    self._broadcast_reservation(bus, now, "RELEASE", old)
         # Only "idle" if it is actually standing on a square. Part way along a
         # step it is stopped, not idle, and saying otherwise used to snap it
         # backwards onto the square behind it.
@@ -2875,6 +2950,36 @@ class Robot:
             if self.goal != self.charger:
                 self.set_goal(self.charger)
 
+            # Queued robots keep the charger they chose. When that exact bay
+            # becomes free, promote the queue assignment into a real booking;
+            # never rerun nearest-charger selection and jump to another bay.
+            if self._charge_slot is None:
+                key = node_key(self.charger)
+                occupied = (self.charger != self.cell
+                            and self.charger in set(self.known_occupied(now)))
+                top_up = max(0.0, self.CHARGE_UNTIL - self.battery) / self.CHARGE_RATE
+                leg = self.plan_path(
+                    grid, self.cell, self.charger, now,
+                    blocked=self.blocked_map.cells(now),
+                )
+                if leg is None:
+                    return None
+                travel = (len(leg) - 1) / max(self.travel_speed(), 0.1)
+                start, end = now, now + travel + top_up + self.CLEARANCE
+                owner = self.table.owner(key, start, end)
+                lease_owner = self.table.owner(
+                    target_key(self.charger), start, end,
+                )
+                if (occupied
+                        or (owner is not None
+                            and owner.robot_id != self.robot_id)
+                        or (lease_owner is not None
+                            and lease_owner.robot_id != self.robot_id)):
+                    return None
+                self._charge_slot = (start, end)
+                return (f"{self.robot_id}'s queued bay "
+                        f"({self.charger.x}, {self.charger.y}) is free")
+
             # Still on our way. Check we have not been outbid in the meantime.
             #
             # Every robot decides in the same tick, before anybody has heard
@@ -2890,12 +2995,20 @@ class Robot:
                                start=start, end=end,
                                priority=self.charge_urgency())
             owner = self.table.owner(key, start, end)
-            if (owner is not None and owner.robot_id != self.robot_id
-                    and owner.rank < mine.rank):
+            target_owner = self.table.owner(
+                target_key(self.charger), start, end,
+            )
+            winner = min(
+                (claim for claim in (owner, target_owner)
+                 if claim is not None and claim.robot_id != self.robot_id),
+                key=lambda claim: claim.rank,
+                default=None,
+            )
+            if winner is not None and winner.rank < mine.rank:
                 bay = self.charger
                 self._leave_charger(bus, now)
                 return (f"{self.robot_id} stood down from bay "
-                        f"({bay.x}, {bay.y}) for {owner.robot_id}, who is emptier")
+                        f"({bay.x}, {bay.y}) for {winner.robot_id}, who is emptier")
             return None
 
         if not self._should_charge(grid, now):

@@ -9,7 +9,7 @@ library. It is shared, unchanged, by:
 Keeping it clean is what stops the brain from being written twice.
 """
 
-from .astar import find_path, manhattan, uniform_cost
+from .astar import find_path, find_space_time_path, manhattan, uniform_cost
 from .bus import FleetBus, InMemoryBus
 from .conflicts import (DEFAULT_CLEARANCE, DEFAULT_HORIZON, Conflict, ConflictKind,
                         Plan, Window, build_plan, find_conflicts)
@@ -30,7 +30,8 @@ from .priority import (BASE_PRIORITY, DOMINANCE_MARGIN, as_points,
                        effective_priority, next_wait_credit, quantise,
                        yields_to)
 from .reservations import (DEFAULT_LOOKAHEAD, OCCUPANCY_PRIORITY, Reservation,
-                           ReservationTable, avoidance_cost, edge_key, node_key)
+                           ReservationTable, avoidance_cost, edge_key, node_key,
+                           target_key)
 from .robot import Robot, RobotStatus
 from .tasks import (BID_WINDOW, Task, TaskBoard, TaskStatus, auction_winner,
                     bid_cost, bid_rank)
@@ -41,13 +42,13 @@ __all__ = [
     "Inventory", "Shelf", "CATALOGUE", "Human", "CentralCommand", "OperatorGoal",
     "CentralPlanner", "Reslotter", "SlotMove",
     "Cell", "CellKind", "Grid", "default_grid",
-    "find_path", "manhattan", "uniform_cost",
+    "find_path", "find_space_time_path", "manhattan", "uniform_cost",
     "Robot", "RobotStatus",
     "FleetBus", "InMemoryBus",
     "FleetView", "Neighbour", "DEFAULT_STALE_AFTER",
     "Heartbeat", "PoseUpdate", "IntentUpdate", "ConflictAlert", "PathReservation",
     "MessageType", "from_dict",
-    "Reservation", "ReservationTable", "node_key", "edge_key", "DEFAULT_LOOKAHEAD",
+    "Reservation", "ReservationTable", "node_key", "edge_key", "target_key", "DEFAULT_LOOKAHEAD",
     "OCCUPANCY_PRIORITY", "avoidance_cost",
     "effective_priority", "next_wait_credit", "as_points", "BASE_PRIORITY",
     "yields_to", "quantise", "DOMINANCE_MARGIN",

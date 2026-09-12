@@ -342,6 +342,11 @@ class World:
         # overwrote the boss's own assignment the very next tick.
         if self.central is None:
             self._sync_board()
+        # Finished work is terminal. Keep a short recent window for display,
+        # then reduce it to counters/tombstones on every local board.
+        self.board.archive_finished()
+        for robot in self.robots.values():
+            robot.board.archive_finished()
         self._reannounce_forgotten_tasks()
 
         # Phase 21: does the warehouse know enough yet to move anything
@@ -1370,6 +1375,7 @@ class World:
     def kpis(self) -> Dict[str, object]:
         """The numbers on the dashboard's top strip."""
         robots = list(self.robots.values())
+        task_stats = self.board.stats(self.sim_time)
         moving = sum(1 for r in robots if r.status is RobotStatus.MOVING)
         idle = sum(1 for r in robots if r.status is RobotStatus.IDLE)
         blocked = sum(1 for r in robots if r.status is RobotStatus.BLOCKED)
@@ -1385,7 +1391,7 @@ class World:
             "charging": charging,
             "collisions": self.collisions,
             "geometry_interventions": self.geometry_interventions,
-            "tasks_completed": self.board.stats(self.sim_time)["done"],
+            "tasks_completed": task_stats["done"],
             "total_distance": round(distance, 1),
             "avg_battery": round(battery, 1),
             "sim_time": round(self.sim_time, 1),
@@ -1408,7 +1414,7 @@ class World:
             "deadlocks_broken": self.deadlocks_broken,
             "obstacles": len(self.obstacles),
             "safe_mode": sum(1 for r in robots if r.safe_mode),
-            **{f"task_{k}": v for k, v in self.board.stats(self.sim_time).items()},
+            **{f"task_{k}": v for k, v in task_stats.items()},
             "blocked_known": len(set().union(*[r.blocked_cells(self.sim_time)
                                                for r in robots]) if robots else set()),
             "yields": sum(r.yields for r in robots),

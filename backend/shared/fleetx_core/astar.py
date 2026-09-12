@@ -17,6 +17,7 @@ import heapq
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .grid import Cell, Grid
+from .reservations import ReservationTable, edge_key, node_key, target_key
 
 # A cost function scores one step from square A to square B.
 # Phase 1 always returns 1.0 (every step costs the same).
@@ -98,6 +99,106 @@ def find_path(
                 counter += 1
 
     # Explored everything reachable and never found the goal.
+    return None
+
+
+def find_space_time_path(
+    grid: Grid,
+    start: Cell,
+    goal: Cell,
+    *,
+    table: Optional[ReservationTable],
+    robot_id: str,
+    now: float,
+    speed: float,
+    cost_fn: Optional[CostFn] = None,
+    blocked: Optional[Set[Cell]] = None,
+    max_time_steps: int = 200,
+    max_expansions: int = 12_000,
+    clearance: float = 0.35,
+) -> Optional[List[Cell]]:
+    """Bounded A* over ``(cell, time)`` with a real WAIT action.
+
+    Every candidate checks both its destination cell and traversed edge in the
+    robot's local reservation table. No shared/global table is required.
+    """
+    cost_fn = cost_fn or uniform_cost
+    blocked = blocked or set()
+    if not grid.is_walkable(start) or not grid.is_walkable(goal) or goal in blocked:
+        return None
+    if start == goal:
+        return [start]
+
+    dwell = 1.0 / max(speed, 0.1)
+    # Long enough for a useful detour/wait, but never let a small map create
+    # hundreds of pointless time layers. The expansion cap remains the final
+    # CPU guard for dense traffic.
+    max_time_steps = min(max_time_steps,
+                         max(int(manhattan(start, goal)) + 32, 48))
+    State = Tuple[Cell, int]
+    origin: State = (start, 0)
+    frontier: List[Tuple[float, int, State]] = [(manhattan(start, goal), 0, origin)]
+    came_from: Dict[State, State] = {}
+    cost_so_far: Dict[State, float] = {origin: 0.0}
+    counter = 1
+    expansions = 0
+
+    while frontier and expansions < max_expansions:
+        _, _, state = heapq.heappop(frontier)
+        current, step = state
+        expansions += 1
+        if current == goal:
+            route = [current]
+            while state != origin:
+                state = came_from[state]
+                route.append(state[0])
+            route.reverse()
+            return route
+        if step >= max_time_steps:
+            continue
+
+        depart = now + step * dwell
+        arrive = depart + dwell
+        # Waiting is a first-class action, considered after movement so an
+        # equally good clear route does not acquire pointless pauses.
+        actions = list(grid.neighbours(current)) + [current]
+        for nxt in actions:
+            if nxt in blocked:
+                continue
+            if table is not None:
+                node_owner = table.blocked_by(
+                    robot_id, node_key(nxt), arrive - clearance,
+                    arrive + dwell + clearance,
+                )
+                if node_owner is not None:
+                    continue
+                if nxt != current:
+                    edge_owner = table.blocked_by(
+                        robot_id, edge_key(current, nxt), depart - clearance,
+                        arrive + clearance,
+                    )
+                    if edge_owner is not None:
+                        continue
+                if nxt == goal:
+                    lease_owner = table.blocked_by(
+                        robot_id, target_key(goal), arrive - clearance,
+                        arrive + dwell + clearance,
+                    )
+                    if lease_owner is not None:
+                        continue
+
+            nxt_state = (nxt, step + 1)
+            wait_cost = 1.1 if nxt == current else cost_fn(current, nxt)
+            new_cost = cost_so_far[state] + wait_cost
+            if new_cost >= cost_so_far.get(nxt_state, float("inf")):
+                continue
+            cost_so_far[nxt_state] = new_cost
+            came_from[nxt_state] = state
+            heapq.heappush(frontier, (
+                new_cost + manhattan(nxt, goal), counter, nxt_state,
+            ))
+            counter += 1
+
     return None
 
 

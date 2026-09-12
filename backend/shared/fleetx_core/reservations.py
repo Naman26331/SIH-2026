@@ -58,6 +58,11 @@ def node_key(cell: Cell) -> ResourceKey:
     return ("N", cell.x, cell.y)
 
 
+def target_key(cell: Cell) -> ResourceKey:
+    """Exclusive short-lived lease for a pickup/drop/charger destination."""
+    return ("T", cell.x, cell.y)
+
+
 def edge_key(a: Cell, b: Cell) -> ResourceKey:
     """The key for one aisle segment.
 
@@ -97,8 +102,8 @@ class Reservation:
         return (-bucket(self.priority), self.robot_id)
 
     def to_dict(self) -> Dict[str, object]:
-        kind = "NODE" if self.resource[0] == "N" else "EDGE"
-        if kind == "NODE":
+        kind = {"N": "NODE", "T": "TARGET"}.get(self.resource[0], "EDGE")
+        if kind in ("NODE", "TARGET"):
             where = f"({self.resource[1]},{self.resource[2]})"
         else:
             where = f"({self.resource[1]},{self.resource[2]})-({self.resource[3]},{self.resource[4]})"

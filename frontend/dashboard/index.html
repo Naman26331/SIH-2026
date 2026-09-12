@@ -579,6 +579,7 @@ addEventListener("blur", releaseHold);
 
 const cv  = document.getElementById("cv");
 const ctx = cv.getContext("2d");
+let STATIC_LAYER = null;
 
 // ---------------------------------------------------------------- boot
 async function boot(){
@@ -596,8 +597,11 @@ function connect(){
   es.onopen  = () => setLive(true);
   es.onerror = () => setLive(false);
   es.onmessage = (e) => {
+    const packet = JSON.parse(e.data);
     const prev = STATE;
-    STATE = JSON.parse(e.data);
+    if (packet.stream === "full") STATE = packet.state;
+    else if (packet.stream === "delta") STATE = applyStatePatch(STATE, packet.patch);
+    else STATE = packet; // compatibility with older backend
     setLive(true);
 
     // If the robot you were watching was removed or the fleet was rebuilt,
@@ -623,6 +627,38 @@ function connect(){
     renderHealth();
     watchAll(prev);
   };
+}
+
+// Backend sends keyed entity patches instead of repeating every robot/task
+// object on every frame. Changed branches are copied so event watchers still
+// receive an honest previous state.
+function applyStatePatch(base, patch){
+  if (patch === null || typeof patch !== "object") return patch;
+  if (Array.isArray(patch)) return patch;
+
+  if (patch.$list === "keyed"){
+    const key = patch.key;
+    const rows = Array.isArray(base) ? base : [];
+    const byId = new Map(rows.map(row => [row[key], row]));
+    for (const id of (patch.remove || [])) byId.delete(id);
+    for (const change of (patch.upsert || [])){
+      const id = change[key];
+      byId.set(id, applyStatePatch(byId.get(id) || {}, change));
+    }
+    if (patch.order) return patch.order.map(id => byId.get(id)).filter(Boolean);
+    const oldIds = new Set(rows.map(row => row[key]));
+    return rows.filter(row => byId.has(row[key])).map(row => byId.get(row[key]))
+      .concat([...byId].filter(([id]) => !oldIds.has(id)).map(([, row]) => row));
+  }
+
+  const source = (base && typeof base === "object" && !Array.isArray(base))
+    ? base : {};
+  const out = {...source};
+  for (const key of (patch.$delete || [])) delete out[key];
+  for (const [key, value] of Object.entries(patch)){
+    if (key !== "$delete") out[key] = applyStatePatch(source[key], value);
+  }
+  return out;
 }
 // Things that must see EVERY update or they miss an event entirely.
 function watchAll(prev){
@@ -671,13 +707,28 @@ function layout(){
   cv.style.width = w + "px"; cv.style.height = h + "px";
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   OX = 0; OY = 0;
+  buildStaticLayer(w, h, dpr);
 }
 window.addEventListener("resize", () => { if (MAP) layout(); });
+
+function buildStaticLayer(w, h, dpr){
+  const layer = document.createElement("canvas");
+  layer.width = w * dpr; layer.height = h * dpr;
+  const g = layer.getContext("2d");
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawMap(g);
+  STATIC_LAYER = layer;
+}
 
 // ---------------------------------------------------------------- drawing
 function draw(){
   if (MAP){
-    drawMap();
+    if (STATIC_LAYER){
+      ctx.save();
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.drawImage(STATIC_LAYER, 0, 0);
+      ctx.restore();
+    }
     if (STATE){ drawBookings(); drawObstacles(); drawJobs(); drawStaging(); drawBeliefs(); drawPaths(); drawGoals(); drawConflicts(); drawHumans(); drawRobots(); }
     drawBursts();
     drawHover();
@@ -725,14 +776,14 @@ function drawHumans(){
   }
 }
 
-function drawMap(){
+function drawMap(g=ctx){
   const W = MAP.width * CELL, H = MAP.height * CELL;
-  ctx.fillStyle = C.floor; ctx.fillRect(0,0,W,H);
-  ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
-  ctx.beginPath();
-  for (let x=0; x<=MAP.width;  x++){ ctx.moveTo(x*CELL+.5, 0); ctx.lineTo(x*CELL+.5, H); }
-  for (let y=0; y<=MAP.height; y++){ ctx.moveTo(0, y*CELL+.5); ctx.lineTo(W, y*CELL+.5); }
-  ctx.stroke();
+  g.fillStyle = C.floor; g.fillRect(0,0,W,H);
+  g.strokeStyle = C.grid; g.lineWidth = 1;
+  g.beginPath();
+  for (let x=0; x<=MAP.width;  x++){ g.moveTo(x*CELL+.5, 0); g.lineTo(x*CELL+.5, H); }
+  for (let y=0; y<=MAP.height; y++){ g.moveTo(0, y*CELL+.5); g.lineTo(W, y*CELL+.5); }
+  g.stroke();
 
   for (let y=0; y<MAP.height; y++){
     for (let x=0; x<MAP.width; x++){
@@ -740,17 +791,17 @@ function drawMap(){
       if (kind === "FLOOR") continue;
       const px = x*CELL, py = y*CELL;
       if (kind === "SHELF"){
-        ctx.fillStyle = C.shelf; ctx.fillRect(px+1, py+1, CELL-2, CELL-2);
-        ctx.fillStyle = C.shelfTop; ctx.fillRect(px+1, py+1, CELL-2, Math.max(2, CELL*0.16));
+        g.fillStyle = C.shelf; g.fillRect(px+1, py+1, CELL-2, CELL-2);
+        g.fillStyle = C.shelfTop; g.fillRect(px+1, py+1, CELL-2, Math.max(2, CELL*0.16));
         // Phase 11: the rack's own number, faint. 120 of them would be noise
         // at a glance, so they only appear once the squares are big enough to
         // read, and the aisle letter below is what you navigate by.
         const sh = SHELF_BY_CELL.get(`${x},${y}`);
         if (sh && CELL >= 22){
-          ctx.fillStyle = "#3E5063";
-          ctx.font = `${Math.round(CELL*0.3)}px ui-monospace,Menlo,monospace`;
-          ctx.textAlign="center"; ctx.textBaseline="middle";
-          ctx.fillText(sh.name, px+CELL/2, py+CELL/2+CELL*0.08);
+          g.fillStyle = "#3E5063";
+          g.font = `${Math.round(CELL*0.3)}px ui-monospace,Menlo,monospace`;
+          g.textAlign="center"; g.textBaseline="middle";
+          g.fillText(sh.name, px+CELL/2, py+CELL/2+CELL*0.08);
         }
       } else {
         // PICK squares no longer exist on the map -- orders are collected from
@@ -758,25 +809,25 @@ function drawMap(){
         // still draws correctly.
         const fill = kind==="PICK" ? C.pick : kind==="DROP" ? C.drop : C.chg;
         const edge = kind==="PICK" ? C.pickE: kind==="DROP" ? C.dropE: C.chgE;
-        ctx.fillStyle = fill; ctx.fillRect(px+1, py+1, CELL-2, CELL-2);
-        ctx.strokeStyle = edge; ctx.lineWidth = 1;
-        ctx.strokeRect(px+1.5, py+1.5, CELL-3, CELL-3);
+        g.fillStyle = fill; g.fillRect(px+1, py+1, CELL-2, CELL-2);
+        g.strokeStyle = edge; g.lineWidth = 1;
+        g.strokeRect(px+1.5, py+1.5, CELL-3, CELL-3);
         if (CELL >= 16){
-          ctx.fillStyle = edge;
-          ctx.font = `600 ${Math.floor(CELL*0.46)}px ui-monospace,Menlo,monospace`;
-          ctx.textAlign="center"; ctx.textBaseline="middle";
-          ctx.fillText(kind[0], px+CELL/2, py+CELL/2+1);
+          g.fillStyle = edge;
+          g.font = `600 ${Math.floor(CELL*0.46)}px ui-monospace,Menlo,monospace`;
+          g.textAlign="center"; g.textBaseline="middle";
+          g.fillText(kind[0], px+CELL/2, py+CELL/2+1);
         }
       }
     }
   }
-  drawAisleLetters();
+  drawAisleLetters(g);
 }
 
 // One big faint letter per block of racks. This is the warehouse sign you look
 // up at: it is how you find aisle A without being told where it is, and it is
 // what makes "shelf A14" in an order mean something on the map.
-function drawAisleLetters(){
+function drawAisleLetters(g=ctx){
   if (!MAP.shelves || !MAP.shelves.length || CELL < 12) return;
   const spans = new Map();                       // letter -> x/y extent
   for (const sh of MAP.shelves){
@@ -786,15 +837,15 @@ function drawAisleLetters(){
     e.y0 = Math.min(e.y0, sh.cell[1]);
     spans.set(L, e);
   }
-  ctx.save();
-  ctx.font = `700 ${Math.round(CELL*0.85)}px ui-monospace,Menlo,monospace`;
-  ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.fillStyle = "rgba(143,179,217,.34)";
+  g.save();
+  g.font = `700 ${Math.round(CELL*0.85)}px ui-monospace,Menlo,monospace`;
+  g.textAlign = "center"; g.textBaseline = "middle";
+  g.fillStyle = "rgba(143,179,217,.34)";
   for (const [L, e] of spans){
     const cx = ((e.x0 + e.x1) / 2 + 0.5) * CELL;
-    ctx.fillText(L, cx, (e.y0 - 0.5) * CELL);
+    g.fillText(L, cx, (e.y0 - 0.5) * CELL);
   }
-  ctx.restore();
+  g.restore();
 }
 
 // Phase 12. Where a robot has gone to WAIT on a hunch. Drawn as a dashed ring
@@ -1572,7 +1623,9 @@ function renderBlocks(){
         <span style="color:var(--red)">&#9646;</span>
         <span>(${b.cell[0]}, ${b.cell[1]})</span>
         <span style="color:var(--dim)">found by ${b.reported_by}</span>
-        <span style="margin-left:auto;color:var(--dim)">fades in ${b.remaining}s</span>
+        <span style="margin-left:auto;color:var(--dim)">${
+          b.remaining == null ? "until cleared" : `temporary ${b.remaining}s`
+        }</span>
       </div>`).join("")
     : `<div class="none">${selected} knows of nothing in the way</div>`);
 }
