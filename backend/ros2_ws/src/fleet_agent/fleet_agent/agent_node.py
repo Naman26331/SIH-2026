@@ -241,6 +241,7 @@ class FleetAgent(Node):
         self.robot.check_conflicts(self.grid, now)
         self.robot.announce_conflicts(self.bus, now)
         self.robot.update_priority(now, dt)
+        self.robot.consider_predicted_conflict(self.grid, now, self.bus)
         self.robot.reserve_ahead(self.bus, now)
         self.robot.check_clearance(now, dt)
         if self.robot.consider_reroute(self.grid, now, self.bus):

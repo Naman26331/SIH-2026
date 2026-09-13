@@ -301,6 +301,13 @@ class World:
         # been stuck, the more it is owed.
         for robot in self.robots.values():
             robot.update_priority(self.sim_time, dt)
+        # Act on the intent horizon now, while robots are still several cells
+        # apart. The priority winner requests a PIBT yield; only the loser
+        # diverts, so both robots no longer wait for next-cell contact.
+        for robot in self.robots.values():
+            if robot.consider_predicted_conflict(
+                    self.grid, self.sim_time, self.bus):
+                self.reroutes += 1
         for robot in self.robots.values():
             robot.reserve_ahead(self.bus, self.sim_time)
         for robot in self.robots.values():

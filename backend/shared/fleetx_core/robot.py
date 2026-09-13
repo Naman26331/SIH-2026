@@ -108,6 +108,10 @@ class Robot:
     conflicts: List[Conflict] = field(default_factory=list)
     conflicts_seen: int = 0
     _announced: Dict[tuple, float] = field(default_factory=dict)
+    # Pairwise alerts heard from the fleet, joined locally into one connected
+    # conflict component. No server builds this graph: every robot owns a copy.
+    _coordination_edges: Dict[frozenset, tuple] = field(default_factory=dict)
+    _coordination_changed_at: float = -99.0
 
     # --- booking squares before driving onto them (Phase 5) ---
     table: Optional[ReservationTable] = None   # its OWN copy of the bookings
@@ -178,6 +182,7 @@ class Robot:
     # asker demonstrably passes, with a deadline so a misjudgement can
     # never freeze a robot for good.
     _yield_for: Optional[str] = None
+    _yield_resource: Optional[Cell] = None
     _yield_until: float = 0.0
     _still_for: float = 0.0         # seconds spent going nowhere, see stalled_for
     _reversing: bool = False        # backing out of a segment it cannot finish
@@ -319,6 +324,15 @@ class Robot:
         """
         if self.status is RobotStatus.FAILED:
             return
+
+        # A completed yield can be followed immediately by task logic setting
+        # the same original destination again. If both markers now match, the
+        # diversion is over; retaining suspended_goal would disable every
+        # future proactive/group negotiation for this robot.
+        if self._suspended_goal is not None and self.goal == self._suspended_goal:
+            self._suspended_goal = None
+            self._yield_for = None
+            self._yield_resource = None
 
         # Sitting on a charger. Deciding runs AFTER the battery pass in a tick,
         # so without this it would see "no destination", call the robot idle,
@@ -464,7 +478,8 @@ class Robot:
 
         if self.status not in (RobotStatus.MOVING, RobotStatus.WAITING,
                                RobotStatus.REROUTING,
-                               RobotStatus.YIELDING) or not self.path:
+                               RobotStatus.YIELDING,
+                               RobotStatus.NEGOTIATING) or not self.path:
             # Stand still -- but a robot that is PART WAY along a step is
             # physically between two squares, and must stay where its wheels
             # actually are. Snapping it back onto the square behind it is a
@@ -689,6 +704,7 @@ class Robot:
 
             self.fleet.ingest(message, now)
             self._ingest_reservation(message)
+            self._ingest_conflict_news(message, now)
             self._ingest_jam_news(message, now)
             self._ingest_blocked_aisle(message, now)
             self._ingest_task_news(message, now)
@@ -733,6 +749,7 @@ class Robot:
             (self.path[0].x, self.path[0].y) if self.path else None,
             self.status.value,
             self.hold,          # stopping or starting is news worth sending
+            self.priority,      # group election must not use stale standing
         )
         if key != self._last_intent_key:
             self._last_intent_key = key
@@ -780,6 +797,7 @@ class Robot:
     # ------------------------------------ seeing trouble coming (Phase 4)
 
     ALERT_COOLDOWN = 1.0        # don't re-announce the same clash every tick
+    COORDINATION_EDGE_TTL = 2.5
 
     def own_plan(self, now: float, horizon: float = DEFAULT_HORIZON) -> Plan:
         """This robot's own bookings: which squares it will hold, and when."""
@@ -823,7 +841,56 @@ class Robot:
             self.neighbour_plans(now, horizon),
             grid, horizon,
         )
+        for conflict in self.conflicts:
+            if conflict.pair not in self._coordination_edges:
+                self._coordination_changed_at = now
+            self._coordination_edges[conflict.pair] = (
+                now, conflict.lead_time)
         return self.conflicts
+
+    def _ingest_conflict_news(self, message, now: float) -> None:
+        """Merge peer conflict alerts into this robot's local group graph."""
+        if not isinstance(message, ConflictAlert):
+            return
+        edge = frozenset((message.robot_a, message.robot_b))
+        if len(edge) == 2:
+            if edge not in self._coordination_edges:
+                self._coordination_changed_at = now
+            self._coordination_edges[edge] = (
+                now, max(0.0, float(message.estimated_time)))
+
+    def coordination_group(self, now: float) -> set:
+        """Connected imminent-conflict component containing this robot."""
+        stale = [edge for edge, (seen, _lead) in self._coordination_edges.items()
+                 if now - seen > self.COORDINATION_EDGE_TTL]
+        for edge in stale:
+            del self._coordination_edges[edge]
+
+        group = {self.robot_id}
+        changed = True
+        while changed:
+            changed = False
+            for edge, (_seen, lead) in self._coordination_edges.items():
+                if lead > self.PROACTIVE_CONFLICT_HORIZON:
+                    continue
+                if group.intersection(edge) and not edge.issubset(group):
+                    group.update(edge)
+                    changed = True
+        return group
+
+    def coordination_leader(self, now: float) -> str:
+        """Winner for the whole local conflict component, not just one pair."""
+        group = self.coordination_group(now)
+        # Group leadership must not depend on waiting credit: that score rises
+        # precisely while the chain is executing and previously rotated the
+        # root every few seconds. Robot IDs are immutable, globally unique and
+        # seen identically by every member, so the minimum ID is a stable
+        # decentralized election. Once it clears, it leaves the component and
+        # the next member wins automatically.
+        known = [robot_id for robot_id in group
+                 if robot_id == self.robot_id
+                 or (self.fleet and self.fleet.get(robot_id) is not None)]
+        return min(known) if known else self.robot_id
 
     def announce_conflicts(self, bus, now: float) -> None:
         """Tell the fleet what we spotted, without spamming the radio."""
@@ -1035,6 +1102,8 @@ class Robot:
         self._reroute_at = -99.0
         self._reroute_cooldown_until = 0.0
         self._announced.clear()
+        self._coordination_edges.clear()
+        self._coordination_changed_at = -99.0
         self.waits = WaitForGraph()
         self._suspended_goal = None
         self._resume_at = 0.0
@@ -1042,6 +1111,7 @@ class Robot:
         self._asked_at.clear()
         self._jam_asked_at.clear()
         self._yield_for = None
+        self._yield_resource = None
         self._yield_until = 0.0
         self._pibt_request = None
         self._pibt_outbox.clear()
@@ -1385,12 +1455,17 @@ class Robot:
     REROUTE_SHOW = 0.8          # how long the REROUTING label stays up
     NEGOTIATION_LOCK = 5.0      # stops both robots changing their mind
     NEGOTIATION_RETRY = 0.6     # tolerate a dropped best-effort packet
+    PROACTIVE_CONFLICT_HORIZON = 4.0
     DETOUR_SLACK = 4            # squares of detour we accept for free
     DETOUR_FACTOR = 2.5         # ...plus this multiple of what is left
 
     def update_priority(self, now: float, dt: float) -> None:
         """Recompute local priority, then apply temporary PIBT inheritance."""
-        self.wait_credit = next_wait_credit(self.wait_credit, self.hold, dt)
+        # Voluntarily moving aside is not starvation. Awarding wait credit
+        # while yielding made the loser outrank the original winner, reverse
+        # the negotiation, and produce an endless left-right role swap.
+        owed_wait = self.hold and self._suspended_goal is None
+        self.wait_credit = next_wait_credit(self.wait_credit, owed_wait, dt)
         # Rounded to a whole point so the number other robots hear steps up
         # cleanly instead of drifting every tick.
         local_priority = quantise(effective_priority(
@@ -1403,6 +1478,105 @@ class Robot:
             self._pibt_priority = 0
             self._pibt_root = ""
         self.priority = max(local_priority, self._pibt_priority)
+
+    def consider_predicted_conflict(self, grid: Grid, now: float,
+                                    bus=None) -> bool:
+        """Start distributed PIBT before the robots meet nose-to-nose.
+
+        Conflict detection has always looked several seconds ahead, but the
+        result used to be display-only.  This turns the earliest imminent
+        conflict into an action.  The deterministic priority winner asks the
+        loser to clear the *future conflict cell*; the loser alone changes its
+        route.  Every decision still uses only this robot's peer notebook.
+
+        Returns True only when this robot actually changes its own route.
+        """
+        if (self.status is RobotStatus.FAILED or self.halted
+                or not self.path or self.goal is None
+                or self._pibt_request is not None
+                or self._suspended_goal is not None
+                or (self._pibt_root
+                    and self._pibt_root != self.robot_id)):
+            return False
+
+        # All pairwise clashes connected through a crowded junction elect one
+        # root. Without this, R1 asks R2 while R2 asks R3 and R3 asks R1: each
+        # individual decision is valid, but the group thrashes forever.
+        if self.coordination_leader(now) != self.robot_id:
+            return False
+        # One message round lets every peer merge the pairwise alerts into the
+        # same connected component before anybody commits to being its root.
+        if now - self._coordination_changed_at < 0.2:
+            return False
+
+        conflict = next((item for item in self.conflicts
+                         if (0.0 <= item.lead_time
+                             <= self.PROACTIVE_CONFLICT_HORIZON
+                             and self._pibt_accepted_until.get(
+                                 item.robot_b, 0.0) <= now)), None)
+        if conflict is None:
+            return False
+        peer = conflict.robot_b
+        other = self.fleet.get(peer)
+        if other is None:
+            return False
+
+        # The same total ordering is evaluated independently by both peers,
+        # therefore exactly one side requests movement even with no leader.
+        if yields_to(self.priority, self.robot_id,
+                     other.priority, other.robot_id):
+            return False
+
+        if self._pibt_rejected_until.get(peer, 0.0) > now:
+            return self._reroute_around_predicted_conflict(
+                grid, now, conflict.cell, peer)
+
+        last = self._asked_at.get(peer, -99.0)
+        if now - last < self.NEGOTIATION_RETRY:
+            return False
+        self._asked_at[peer] = now
+        self.asked += 1
+        self._ask_to_move(
+            bus, now, peer, f"PREDICTED_{conflict.kind.value}",
+            wanted=conflict.cell)
+        self.status = RobotStatus.NEGOTIATING
+        self.last_decision = (
+            f"{self.robot_id} asked {peer} to clear predicted conflict "
+            f"at ({conflict.cell.x}, {conflict.cell.y})")
+        return False
+
+    def _reroute_around_predicted_conflict(self, grid: Grid, now: float,
+                                           cell: Cell, peer: str) -> bool:
+        """Use local SIPP when the lower-priority peer cannot step aside."""
+        if now < self._reroute_cooldown_until:
+            return False
+
+        committed = self.path[0] if self._progress > 0.0 and self.path else None
+        start = committed if committed is not None else self.cell
+        blocked = self.blocked_map.cells(now) | {cell}
+        blocked.discard(start)
+        alternative = self.plan_path(
+            grid, start, self.goal, now,
+            avoidance_cost(self.table, self.robot_id, now,
+                           avoid_robot=peer,
+                           occupied=self.known_occupied(now)),
+            blocked=blocked)
+        if alternative is None or len(alternative) < 2:
+            return False
+
+        new_path = list(alternative) if committed is not None else alternative[1:]
+        if new_path == self.path:
+            return False
+        self._reroute_cooldown_until = now + self.REROUTE_COOLDOWN
+        self.forget_bookings_soft()
+        self.path = new_path
+        self.status = RobotStatus.REROUTING
+        self._reroute_at = now
+        self.reroutes += 1
+        self.last_decision = (
+            f"{self.robot_id} rerouted early around {peer} at "
+            f"({cell.x}, {cell.y})")
+        return True
 
     def consider_reroute(self, grid: Grid, now: float, bus=None) -> bool:
         """Held up: wait it out, or take the long way round?
@@ -1428,6 +1602,13 @@ class Robot:
                 "unknown", "obstacle", "unreserved"):
             other = self.fleet.get(peer)
             if other is not None:
+                group = self.coordination_group(now)
+                leader = self.coordination_leader(now)
+                if len(group) > 1 and leader != self.robot_id:
+                    self.status = RobotStatus.YIELDING
+                    self.last_decision = (
+                        f"{self.robot_id} follows group chain led by {leader}")
+                    return False
                 if self._pibt_accepted_until.get(peer, 0.0) > now:
                     self.status = RobotStatus.NEGOTIATING
                     return False               # peer is physically clearing
@@ -2381,11 +2562,19 @@ class Robot:
 
         elif isinstance(message, YieldRequest) and message.target == self.robot_id:
             action = message.action
-            if action in ("ACCEPT", "REJECT"):
+            if action in ("PENDING", "ACCEPT", "REJECT"):
                 state = self._pibt_request
                 if (state is not None
                         and state.get("child_id") == message.conflict_id
                         and state.get("child") == message.robot_id):
+                    if action == "PENDING":
+                        # The leaf is still executing. Refresh every upstream
+                        # lease so an eight-robot chain cannot expire from the
+                        # root while useful movement is propagating below it.
+                        state["asked_at"] = now
+                        self._pibt_until = max(
+                            self._pibt_until, now + self.NEGOTIATION_LOCK)
+                        return
                     cell = tuple(message.resource)
                     state["child_id"] = None
                     state["child"] = None
@@ -2396,6 +2585,10 @@ class Robot:
                         # the branch and wait until local pose/sensor evidence
                         # says it is physically clear.
                         state["accepted"] = (message.robot_id, Cell(*cell))
+                elif action == "PENDING":
+                    # Direct requester/root has no parent state. Suppress its
+                    # retry while the downstream chain reports progress.
+                    self._asked_at[message.robot_id] = now
                 elif action == "REJECT":
                     self._pibt_rejected_until[message.robot_id] = (
                         now + self.REROUTE_COOLDOWN)
@@ -2412,6 +2605,19 @@ class Robot:
                 f"{root}:{message.robot_id}:{message.resource[0]}:"
                 f"{message.resource[1]}:{message.seq}")
             wanted = Cell(*message.resource)
+
+            # A connected conflict cluster has exactly one elected root. Old
+            # pairwise jam reports can arrive late and try to start a second
+            # chain; reject that branch instead of letting two trees push the
+            # same robots in opposite directions.
+            group = self.coordination_group(now)
+            leader = self.coordination_leader(now)
+            if (len(group) > 1 and root != leader
+                    and (self.robot_id == leader or root in group)):
+                self._queue_pibt(
+                    "REJECT", message.robot_id, wanted, request_id,
+                    root, trail, message.priority)
+                return
 
             # A retry can cross our ACCEPT on the wire. Acknowledge the same
             # branch again; never begin another displacement for it.
@@ -2435,6 +2641,8 @@ class Robot:
             current = self._pibt_request
             if current is not None and current["request_id"] == request_id:
                 current["asked_at"] = now       # reliable retry, same state
+                self._pibt_until = max(
+                    self._pibt_until, now + self.NEGOTIATION_LOCK)
                 return
             if current is not None and current["request_id"] != request_id:
                 incoming_wins = yields_to(
@@ -2467,7 +2675,8 @@ class Robot:
                 "trail": trail + [self.robot_id],
                 "priority": inherited, "request_id": request_id,
                 "tried": set(), "child": None, "child_id": None,
-                "accepted": None,
+                "accepted": None, "phase": "PLANNING",
+                "progress_at": -99.0,
             }
 
     def report_jam(self, grid: Grid, bus, now: float) -> Optional[str]:
@@ -2484,6 +2693,11 @@ class Robot:
         if self.blocked_by is None:
             return None
         blocker = self.blocked_by
+
+        group = self.coordination_group(now)
+        if (len(group) > 1
+                and self.coordination_leader(now) != self.robot_id):
+            return None                 # one root owns this entire cluster
 
         # Is this a straight two-robot standoff -- me behind them, them behind
         # me? That can never sort itself out, so act on it quickly.
@@ -2548,10 +2762,11 @@ class Robot:
 
         return None
 
-    def _ask_to_move(self, bus, now: float, target: str, reason: str) -> None:
+    def _ask_to_move(self, bus, now: float, target: str, reason: str,
+                     wanted: Optional[Cell] = None) -> None:
         if bus is None or not self.path:
             return
-        wanted = self.path[0]
+        wanted = wanted or self.path[0]
         request_id = (f"{self._pibt_root or self.robot_id}:"
                       f"{target}:{wanted.x}:{wanted.y}")
         self._publish(bus, YieldRequest(
@@ -2571,14 +2786,21 @@ class Robot:
         ))
 
     def answer_requests(self, grid: Grid, now: float) -> Optional[str]:
-        """Advance one step of this peer's distributed PIBT state machine."""
+        """Advance one step of the leaf-to-root PIBT execution chain.
+
+        ACCEPT is evidence, not a promise: it is sent only after this robot no
+        longer occupies or intends to enter the square its parent requested.
+        """
         state = self._pibt_request
         if state is None:
             return None
-        # A reflex stop can leave the body part-way along an edge. Keep the
-        # request pending while back_out_if_wedged() returns it to a cell;
-        # rejecting here made the pair reverse roles forever.
-        if self._progress > 0.0 or self._reversing:
+        self._pibt_until = max(
+            self._pibt_until, now + self.NEGOTIATION_LOCK)
+        # Reversing has to finish first. Normal forward motion is different:
+        # step_aside() can now plan from the already-committed next cell, so an
+        # early request does not sit unanswered until the robots are adjacent.
+        if self._reversing:
+            self._keep_pibt_parent_alive(state, now)
             return None
         if now - state["asked_at"] > self.NEGOTIATION_LOCK:
             self._queue_pibt(
@@ -2589,26 +2811,46 @@ class Robot:
             return f"{self.robot_id} PIBT request expired; parent will backtrack"
 
         asker, wanted = state["parent"], state["wanted"]
+        if state.get("phase") == "CLEARING":
+            if self._pibt_resource_is_clear(state):
+                return self._accept_pibt_request(state, now)
+            self._keep_pibt_parent_alive(state, now)
+            return None
+
         if self.step_aside(
                 grid, now, [wanted], reason="PIBT", yield_for=asker,
                 granted_by=set(state["trail"])):
-            self._queue_pibt(
-                "ACCEPT", asker, wanted, state["request_id"],
-                state["root"], state["trail"], state["priority"])
-            self._pibt_completed_until[state["request_id"]] = (
-                now + self.NEGOTIATION_LOCK)
-            self._pibt_request = None
-            return (f"{self.robot_id} accepted PIBT request from {asker} "
-                    f"-> ({self.goal.x}, {self.goal.y})")
+            state["phase"] = "CLEARING"
+            state["asked_at"] = now
+            if self._pibt_resource_is_clear(state):
+                return self._accept_pibt_request(state, now)
+            self._keep_pibt_parent_alive(state, now, force=True)
+            return (f"{self.robot_id} is clearing ({wanted.x}, {wanted.y}) "
+                    f"for {asker}")
 
         if state["child_id"] is not None:
+            self._keep_pibt_parent_alive(state, now)
             return None                         # wait for ACCEPT / REJECT
         accepted = state.get("accepted")
         if accepted is not None:
             child, side = accepted
             if self._immediate_side_blocker(side, now) == child:
+                self._keep_pibt_parent_alive(state, now)
                 return None                     # accepted child still moving
-            state["accepted"] = None            # sensor/pose confirms clear
+            # The child has physically vacated this cell. In a packed aisle
+            # there may be no off-route refuge for every intermediate robot;
+            # shift into the newly freed cell instead. This is the actual
+            # leaf-to-root PIBT movement: R4 clears, then R3, then R2, then R1.
+            if self._shift_into_cleared_child(
+                    grid, now, state, child, side):
+                state["phase"] = "CLEARING"
+                state["asked_at"] = now
+                if self._pibt_resource_is_clear(state):
+                    return self._accept_pibt_request(state, now)
+                self._keep_pibt_parent_alive(state, now, force=True)
+                return (f"{self.robot_id} shifted into ({side.x}, {side.y}) "
+                        f"after {child} cleared it")
+            state["accepted"] = None            # try another local branch
 
         forwarded = self._pass_the_request_along(grid, now, state)
         if forwarded is not None:
@@ -2619,6 +2861,75 @@ class Robot:
             state["trail"], state["priority"])
         self._pibt_request = None
         return f"{self.robot_id} rejected PIBT request; no local candidate"
+
+    def _pibt_resource_is_clear(self, state: dict) -> bool:
+        """True only when our body and announced route clear parent's cell."""
+        wanted = state["wanted"]
+        if self.cell == wanted:
+            return False
+        if self._progress > 0.0 and self.path and self.path[0] == wanted:
+            return False
+        return wanted not in self.path
+
+    def _shift_into_cleared_child(self, grid: Grid, now: float, state: dict,
+                                  child: str, side: Cell) -> bool:
+        """Execute one safe hop into the cell a downstream child released.
+
+        A packed one-cell aisle cannot give every robot a private refuge. PIBT
+        therefore behaves like sliding tiles: the leaf finds free space and
+        each parent moves exactly one cell into the vacancy, in reverse order.
+        """
+        if self._progress > 0.0 or self._reversing:
+            return False
+        blocked = self.blocked_map.cells(now) | set(self.known_occupied(now))
+        blocked.discard(self.cell)
+        blocked.discard(side)
+        route = self.plan_path(
+            grid, self.cell, side, now, blocked=blocked,
+            ignore_future_from=set(state["trail"]) | {child})
+        if route is None or len(route) < 2:
+            return False
+
+        if self.goal is not None and self._suspended_goal is None:
+            self._suspended_goal = self.goal
+        self.forget_bookings_soft()
+        self.set_goal(side)
+        self.path = route[1:]
+        self._set_hold(True, now, 0.0)  # advertise before executing next tick
+        self.status = RobotStatus.YIELDING
+        self._reroute_at = now
+        self._resume_at = now + self.ASIDE_PAUSE
+        self.yields += 1
+        self._yield_for = state["parent"]
+        self._yield_resource = state["wanted"]
+        self._yield_until = now + self.YIELD_UNTIL
+        return True
+
+    def _keep_pibt_parent_alive(self, state: dict, now: float,
+                                force: bool = False) -> None:
+        """Propagate downstream progress through every hop toward the root."""
+        last = state.get("progress_at", -99.0)
+        if not force and now - last < self.NEGOTIATION_RETRY:
+            return
+        state["progress_at"] = now
+        self._queue_pibt(
+            "PENDING", state["parent"], state["wanted"],
+            state["request_id"], state["root"], state["trail"],
+            state["priority"])
+
+    def _accept_pibt_request(self, state: dict, now: float) -> str:
+        """Commit one cleared hop and let the parent execute its own hop."""
+        asker, wanted = state["parent"], state["wanted"]
+        self._queue_pibt(
+            "ACCEPT", asker, wanted, state["request_id"],
+            state["root"], state["trail"], state["priority"])
+        self._pibt_completed_until[state["request_id"]] = (
+            now + self.NEGOTIATION_LOCK)
+        self._pibt_request = None
+        goal = self.goal
+        suffix = f" -> ({goal.x}, {goal.y})" if goal is not None else ""
+        return (f"{self.robot_id} cleared ({wanted.x}, {wanted.y}); "
+                f"accepted PIBT request from {asker}{suffix}")
 
     def _pass_the_request_along(self, grid: Grid, now: float,
                                 state: dict) -> Optional[str]:
@@ -2673,26 +2984,31 @@ class Robot:
         directly into ``path`` or ignore a peer reservation: that would make
         the deadlock solver itself capable of causing a collision.
         """
-        if self._progress > 0.0:
-            return False             # finish/recover the physical edge first
+        committed = self.path[0] if self._progress > 0.0 and self.path else None
+        start = committed if committed is not None else self.cell
         blocked = set(avoid)
         blocked.update(self.known_occupied(now))
-        if self.path:
-            blocked.add(self.path[0])
-
         blocked |= self.blocked_map.cells(now)
+        # Starting on a contested/occupied cell is legal while planning an
+        # escape from it; only entering such a cell is forbidden.
+        blocked.discard(start)
         # A one-cell retreat in a narrow aisle only moves the deadlock one
         # square. Find the nearest cell OFF the requester's announced route:
         # a side aisle/passing bay where the requester can actually go past.
         anchor = avoid[0] if avoid else (self.path[0] if self.path else self.cell)
         options = self._yield_refuges(
-            grid, now, blocked, yield_for, anchor)
+            grid, now, blocked, yield_for, anchor, start=start)
 
         spot = None
         route = None
         for candidate in options:
+            # Re-labelling the current job destination as a refuge changes
+            # nothing, while leaving suspended_goal == goal forever. That
+            # corrupted state disabled future group elections and recovery.
+            if candidate == self.goal:
+                continue
             candidate_route = self.plan_path(
-                grid, self.cell, candidate, now, blocked=blocked,
+                grid, start, candidate, now, blocked=blocked,
                 ignore_future_from=granted_by)
             if candidate_route is not None and len(candidate_route) > 1:
                 spot, route = candidate, candidate_route
@@ -2704,7 +3020,9 @@ class Robot:
             self._suspended_goal = self.goal
         self.forget_bookings_soft()
         self.set_goal(spot)
-        self.path = route[1:]
+        # Preserve the physical edge already under the wheels. Its remaining
+        # progress still refers to ``committed``; replacing it would teleport.
+        self.path = list(route) if committed is not None else route[1:]
         # reserve_ahead() runs later in the tick. Do not start driving before
         # the newly planned yield route has actually been advertised.
         self._set_hold(True, now, 0.0)
@@ -2714,11 +3032,13 @@ class Robot:
         self.yields += 1
         if yield_for is not None:
             self._yield_for = yield_for
+            self._yield_resource = anchor
             self._yield_until = now + self.YIELD_UNTIL
         return True
 
     def _yield_refuges(self, grid: Grid, now: float, blocked: set,
-                       yield_for: Optional[str], anchor: Cell) -> List[Cell]:
+                       yield_for: Optional[str], anchor: Cell,
+                       start: Optional[Cell] = None) -> List[Cell]:
         """Nearest locally-known square where the requester can pass us."""
         peer_route = set()
         if yield_for and self.fleet:
@@ -2727,8 +3047,9 @@ class Robot:
                 peer_route.add(Cell(*note.cell))
                 peer_route.update(Cell(*pair) for pair in note.planned_nodes)
 
-        queue = deque([(self.cell, 0)])
-        seen = {self.cell}
+        start = start or self.cell
+        queue = deque([(start, 0)])
+        seen = {start}
         candidates = []
         max_depth = min(grid.width + grid.height, 20)
         while queue:
@@ -2777,13 +3098,23 @@ class Robot:
         if self.task is not None or self.charger is not None:
             self._suspended_goal = None
             self._yield_for = None
+            self._yield_resource = None
             return None
         if now < self._resume_at:
             return None
         peer = self._yield_for
         if peer is not None and now < self._yield_until:
             note = self.fleet.get(peer) if self.fleet else None
-            if note is not None:
+            if note is None:
+                return None                    # no proof that it has passed
+            if self._yield_resource is not None:
+                resource = (self._yield_resource.x, self._yield_resource.y)
+                still_contested = (
+                    note.cell == resource or resource in note.planned_nodes)
+                blocked_on_me = self.waits.blocker_of(peer) == self.robot_id
+                if still_contested or blocked_on_me:
+                    return None
+            else:
                 peer_cell = Cell(note.cell[0], note.cell[1])
                 near = (abs(peer_cell.x - self.cell.x)
                         + abs(peer_cell.y - self.cell.y) <= 2)
@@ -2793,6 +3124,7 @@ class Robot:
         goal = self._suspended_goal
         self._suspended_goal = None
         self._yield_for = None
+        self._yield_resource = None
         self.set_goal(goal)
         return f"{self.robot_id} back on the job -> ({goal.x}, {goal.y})"
 

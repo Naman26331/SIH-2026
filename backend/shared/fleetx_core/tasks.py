@@ -17,12 +17,11 @@ The order itself comes from outside the fleet -- a customer bought something.
 But WHO DOES IT is settled by the robots between themselves, so it keeps
 working with the server switched off.
 
-The cheapest robot, not the nearest
------------------------------------
-"Choose the robot with minimum expected cost, not
-simply the nearest robot." A robot on 15% battery four squares away is the
-closest and the worst choice -- it will run flat halfway and the job has to be
-done again.
+Nearest feasible robot
+----------------------
+Battery is a yes/no feasibility gate: a robot that cannot complete the job and
+still reach a charger does not bid. Among robots that can safely finish, route
+distance decides the bid; extra battery must not let a farther robot win.
 """
 
 from dataclasses import dataclass, field
@@ -148,15 +147,11 @@ class Task:
 
 
 # Weights for the cost of a job:
-#   C = w1*distance + w2*congestion + w3*battery + w4*urgency + w5*waiting
+#   C = w1*distance + w2*congestion + w3*urgency + w4*waiting
 W_DISTANCE = 1.0
 W_CONGESTION = 2.0
-W_BATTERY = 25.0
 W_URGENCY = 1.5
 W_WAITING = 1.0
-
-# Below this a robot is a bad bet for a long job -- it may not finish.
-BATTERY_COMFORTABLE = 40.0
 
 
 def bid_cost(
@@ -169,17 +164,15 @@ def bid_cost(
 ) -> float:
     """What this job would cost THIS robot. Lower is a better bid.
 
-    Distance is only the first term. A robot that is nearest but nearly flat,
-    or nearest but already stuck in traffic, should not win.
+    Battery deliberately does not affect ranking here. The caller has already
+    rejected robots that cannot finish and reach a charger, so among feasible
+    robots extra charge is not a reason to drive farther.
     """
     cost = W_DISTANCE * (distance_to_pickup + leg_distance)
     cost += W_CONGESTION * congestion
     cost += W_WAITING * waiting
 
-    # Battery risk: the emptier it is, the worse a bet it is for a long job.
-    if battery < BATTERY_COMFORTABLE:
-        shortfall = (BATTERY_COMFORTABLE - battery) / BATTERY_COMFORTABLE
-        cost += W_BATTERY * shortfall * (1.0 + leg_distance / 40.0)
+    _ = battery  # retained in the API; feasibility is checked before bidding
 
     # An urgent job is worth more effort, so it looks cheaper to take on.
     cost -= W_URGENCY * max(0, task_priority - 5)
