@@ -208,8 +208,15 @@ def find_sipp_path(
             )
             if not conflicts:
                 return probe
-            probe = align_to_tick(
-                max(probe, max(end for _, end in conflicts) + clearance))
+            nxt = align_to_tick(max(end for _, end in conflicts) + clearance)
+            # Never re-probe the slot just proven blocked. A claim can
+            # overlap this window by float dust, and align_to_tick's 1e-9
+            # snap then lands back on the SAME slot -- without this guard
+            # that is an infinite loop (the sim thread holds the server
+            # lock, so the whole backend freezes and /map never answers).
+            # Both branches are tick-aligned, so the probe strictly
+            # advances and this always terminates at the horizon.
+            probe = nxt if nxt > probe else probe + dwell
         return float("inf")
 
     goal_state: Optional[State] = None
