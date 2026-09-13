@@ -8,7 +8,6 @@ No pip install. No npm install.
 Three things it serves:
   GET  /api/map       the warehouse map (sent once, it never changes)
   GET  /api/ws        WebSocket: one full state, then compact live deltas
-  POST /api/goal      "robot R1, go to square (x, y)"
 """
 
 import base64
@@ -75,7 +74,7 @@ _KEYED_LISTS = {
     "neighbours": "robot_id",
 }
 _PANEL_KEYS = {
-    "views", "tasks", "messages", "decisions", "wait_graph", "stuck",
+    "views", "tasks", "wait_graph", "stuck",
     "reslotting",
 }
 _SLOW_KEYS = {
@@ -163,14 +162,13 @@ def _at_rate(current: dict, sent: dict, include: set) -> dict:
 
 
 _ROBOT_WIRE_FIELDS = {
-    "robot_id", "halted", "charging", "health_score", "health_band",
-    "health_reasons", "near_person", "staging", "staging_why", "charger",
-    "cell", "x", "y", "heading", "status", "battery", "goal", "path",
+    "robot_id", "halted", "charging", "near_person", "staging", "staging_why", "charger",
+    "cell", "x", "y", "travel_speed", "heading", "status", "battery", "goal", "path",
     "steps", "priority", "messages_sent", "blocked_by", "reroutes", "task",
     "tasks_done", "waiting",
 }
 _NEIGHBOUR_WIRE_FIELDS = {
-    "robot_id", "x", "y", "planned_nodes", "node_etas", "age", "stale",
+    "robot_id", "position_known", "x", "y", "planned_nodes", "node_etas", "age", "stale",
     "missed",
 }
 _TASK_WIRE_FIELDS = {
@@ -212,9 +210,6 @@ class Simulation:
         self.mode = "simulator"
         self.world = world
         self.scenarios = Scenarios(world)
-        # Which robot the dashboard is currently showing in detail. Only that
-        # one's full picture is put on the wire.
-        self.focus: Optional[str] = None
         self.lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -242,7 +237,7 @@ class Simulation:
 
     def snapshot(self) -> dict:
         with self.lock:
-            snap = self.world.snapshot(focus=self.focus)
+            snap = self.world.snapshot()
             snap["build"] = _build_stamp()
             snap["server_build"] = SERVER_BUILD
             snap["scenario"] = self.scenarios.name
@@ -259,29 +254,6 @@ class Simulation:
             # and never changes. They do not belong in the 20-a-second feed.
             data["shelves"] = self.world.inventory.to_dict()["shelves"]
             return data
-
-    def set_goal(self, robot_id: str, x: int, y: int) -> dict:
-        """Send a robot somewhere. Returns a short plain-English result."""
-        with self.lock:
-            robot = self.world.get(robot_id)
-            if robot is None:
-                return {"ok": False, "message": f"There is no robot called {robot_id}."}
-            target = Cell(int(x), int(y))
-            if not self.world.grid.is_walkable(target):
-                return {"ok": False, "message": "That square is a shelf, nothing can drive there."}
-            # Deliberately sending this robot somewhere releases its stop
-            # button. Anything else would look broken: you click a square, the
-            # robot lights up a route, and then just sits there.
-            was_halted = robot.halted
-            robot.resume()
-            # You have overridden it, so it is no longer going to charge. Hand
-            # the bay back rather than sitting on a booking it will not use.
-            if robot.charger is not None:
-                robot._leave_charger(self.world.bus, self.world.sim_time)
-            robot.set_goal(target)
-            return {"ok": True, "message": f"{robot_id} is heading to ({x}, {y})."
-                    + (" (released from Stop all)" if was_halted else "")}
-
 
     def run_scenario(self, name: str, **kwargs) -> dict:
         """Switch the demo to a named setup, e.g. 'head_on'."""
@@ -326,13 +298,6 @@ class Simulation:
             if action == "remove":
                 return self.world.remove_human()
             return {"ok": False, "message": f"'{action}' is not add or remove."}
-
-    def set_focus(self, robot_id) -> dict:
-        """The dashboard says which robot it is showing, so we can stop sending
-        the other nineteen robots' worth of detail that it throws away."""
-        with self.lock:
-            self.focus = robot_id if robot_id in self.world.robots else None
-            return {"ok": True, "message": f"Showing {self.focus or 'nobody'}."}
 
     def order_rate(self, every: float) -> dict:
         """How fast orders come in."""
@@ -414,7 +379,6 @@ class LiveFleet:
         self.mode = "ros2"
         self.gateway = gateway
         self.world = gateway.world
-        self.focus: Optional[str] = None
 
     def start(self) -> None:
         pass
@@ -423,7 +387,7 @@ class LiveFleet:
         pass
 
     def snapshot(self) -> dict:
-        snap = self.gateway.snapshot(self.focus)
+        snap = self.gateway.snapshot()
         snap.update({
             "build": _build_stamp(), "server_build": SERVER_BUILD,
             "scenario": "ros2_live", "order_every": None,
@@ -436,14 +400,6 @@ class LiveFleet:
             data = self.world.grid.to_dict()
             data["shelves"] = self.world.inventory.to_dict()["shelves"]
             return data
-
-    def set_goal(self, robot_id: str, x: int, y: int) -> dict:
-        return self.gateway.publish_goal(robot_id, x, y)
-
-    def set_focus(self, robot_id) -> dict:
-        with self.gateway.lock:
-            self.focus = robot_id if robot_id in self.world.robots else None
-        return {"ok": True, "message": f"Showing {self.focus or 'nobody'}."}
 
     @staticmethod
     def _unsupported(*_args, **_kwargs) -> dict:
@@ -491,10 +447,10 @@ class Handler(BaseHTTPRequestHandler):
     # ----------------------------------------------------------------- POST
 
     def do_POST(self):
-        if self.path not in ("/api/goal", "/api/scenario", "/api/reset",
+        if self.path not in ("/api/scenario", "/api/reset",
                              "/api/silence", "/api/network", "/api/obstacle",
                              "/api/power", "/api/cut",
-                             "/api/fleet", "/api/rate", "/api/focus",
+                             "/api/fleet", "/api/rate",
                              "/api/battery", "/api/attack", "/api/human"):
             self._send_json({"error": "not found"}, status=404)
             return
@@ -502,11 +458,7 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length) or b"{}")
 
-            if self.path == "/api/goal":
-                result = self.sim.set_goal(
-                    body.get("robot_id", "R1"), body["x"], body["y"]
-                )
-            elif self.path == "/api/scenario":
+            if self.path == "/api/scenario":
                 extra = {k: body[k] for k in ("seed", "every", "limit") if k in body}
                 result = self.sim.run_scenario(body.get("name", "patrol"), **extra)
             elif self.path == "/api/power":
@@ -524,8 +476,6 @@ class Handler(BaseHTTPRequestHandler):
                 result = self.sim.human(body.get("action", "add"))
             elif self.path == "/api/attack":
                 result = self.sim.attack()
-            elif self.path == "/api/focus":
-                result = self.sim.set_focus(body.get("robot_id"))
             elif self.path == "/api/rate":
                 result = self.sim.order_rate(body.get("every", 4.0))
             elif self.path == "/api/fleet":

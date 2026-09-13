@@ -11,4 +11,3 @@ string tag                  # Phase 23: HMAC signature -- see security.py
 
 float64 battery             # percent
 string status               # MOVING, IDLE, FAILED, ...
-string health               # OK, or why not

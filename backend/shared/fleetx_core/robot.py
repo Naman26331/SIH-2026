@@ -17,7 +17,6 @@ differs between simulation and a real robot.
 """
 
 import random
-from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, Iterable, List, Optional
@@ -27,9 +26,6 @@ from .conflicts import (DEFAULT_CLEARANCE, DEFAULT_HORIZON, Conflict, Plan,
                         build_plan, find_conflicts)
 from .deadlock import STUCK_SECONDS, WaitForGraph, Waiting, choose_victim
 from .demand import DemandModel
-from .health import CRITICAL as HEALTH_CRITICAL
-from .health import BANDS, HEALTHY, INCIDENT_WINDOW
-from .health import HealthReport, compute as compute_health
 from .humans import Human
 from . import security
 from .fleet_view import FleetView
@@ -148,13 +144,6 @@ class Robot:
     _known_humans: Dict[str, tuple] = field(default_factory=dict)
     near_person: Optional[str] = None       # who, if anyone, we are slowing for
 
-    # --- is it starting to struggle? (Phase 23) ---
-    health_score: float = 100.0
-    health_band: str = HEALTHY
-    health_reasons: List[str] = field(default_factory=list)
-    _reroute_times: "deque" = field(default_factory=deque)
-    _backout_times: "deque" = field(default_factory=deque)
-    _last_health_check: float = -99.0
     blocked_by: Optional[str] = None
     waiting_since: Optional[float] = None
     wait_time: float = 0.0          # total seconds spent held up
@@ -209,6 +198,7 @@ class Robot:
     tasks_done: int = 0
     bids_won: int = 0
     _my_bids: Dict[str, float] = field(default_factory=dict)
+    _bid_cursor: int = 0
     _task_notes: List[str] = field(default_factory=list)
 
     _progress: float = 0.0          # 0..1 of the way to the next square
@@ -735,7 +725,6 @@ class Robot:
             self._publish(bus, Heartbeat(
                 robot_id=self.robot_id, timestamp=now, seq=self.seq,
                 battery=self.battery, status=self.status.value,
-                health=self.health_band,
             ))
 
         # 3. Pose -- "this is where I am", often, because it changes fast.
@@ -1001,7 +990,6 @@ class Robot:
         self._reroute_at = now
         self._resume_at = now + 1.0 + self._saw_rng.random() * 3.0
         self.reroutes += 1
-        self._reroute_times.append(now)
         return f"{self.robot_id} backed off to ({spot.x}, {spot.y}) - stuck too long"
 
     # --------------------------------------- booking squares (Phase 5)
@@ -1208,6 +1196,7 @@ class Robot:
         self.board = TaskBoard()
         self.task = None
         self._my_bids.clear()
+        self._bid_cursor = 0
         self._task_notes.clear()
         self.fleet = FleetView(self.robot_id, self.fleet.stale_after)
 
@@ -1526,7 +1515,6 @@ class Robot:
             return None
 
         self._reversing = True
-        self._backout_times.append(now)
         self._suspended_goal = self._suspended_goal or self.goal
         return (f"{self.robot_id} was wedged part way into "
                 f"({self.path[0].x}, {self.path[0].y}) - backing out")
@@ -1709,7 +1697,6 @@ class Robot:
         self.path = new_path
         self.replans += 1
         self.reroutes += 1
-        self._reroute_times.append(now)
         self.status = RobotStatus.REROUTING
         self._reroute_at = now
         # Its old bookings are stale now. Keep it still for one tick; the next
@@ -2169,19 +2156,13 @@ class Robot:
     def _bid_and_claim(self, grid: Grid, bus, now: float) -> List[str]:
         notes: List[str] = []
         self._reopen_stale_auctions(now)
-        for task in self.board.open_tasks():
-            if task.task_id not in self._my_bids:
-                cost = self.cost_of(task, grid, now)
-                if cost is None:
-                    continue                  # cannot reach it, so do not bid
-                self._my_bids[task.task_id] = cost
-                task.bids[self.robot_id] = cost
-                if bus is not None:
-                    self._publish(bus, TaskBid(
-                        robot_id=self.robot_id, timestamp=now, seq=self.seq,
-                        task_id=task.task_id, cost=cost))
-                continue
+        open_tasks = self.board.open_tasks()
 
+        # Claim work already evaluated first. This section is cheap: no path
+        # searches, only cached bids and deterministic comparisons.
+        for task in open_tasks:
+            if task.task_id not in self._my_bids:
+                continue
             # Auction has been open long enough. Did we win it?
             if now - task.announced_at < BID_WINDOW:
                 continue
@@ -2198,6 +2179,34 @@ class Robot:
                     task_id=task.task_id, action="CLAIM",
                     cost=self._my_bids.get(task.task_id, 0.0)))
             break                              # one job at a time
+
+        if self.task is not None:
+            return notes
+
+        # A newly idle robot used to run two space-time A* searches for every
+        # queued order in this single tick. With a backlog, each job completion
+        # froze the simulation and therefore the browser. Spread new bid work
+        # across ticks; existing bids remain cached.
+        bid_budget = 2
+        candidates = sorted(
+            (task for task in open_tasks if task.task_id not in self._my_bids),
+            key=lambda task: (-task.priority, task.announced_at, task.task_id),
+        )
+        chosen = []
+        if candidates:
+            start = self._bid_cursor % len(candidates)
+            chosen = (candidates[start:] + candidates[:start])[:bid_budget]
+            self._bid_cursor = (start + len(chosen)) % len(candidates)
+        for task in chosen:
+            cost = self.cost_of(task, grid, now)
+            if cost is None:
+                continue
+            self._my_bids[task.task_id] = cost
+            task.bids[self.robot_id] = cost
+            if bus is not None:
+                self._publish(bus, TaskBid(
+                    robot_id=self.robot_id, timestamp=now, seq=self.seq,
+                    task_id=task.task_id, cost=cost))
         return notes
 
     # How much a bay is penalised for each robot already on it or heading to
@@ -2263,16 +2272,6 @@ class Robot:
         # abandoned half done.
         if not self.can_finish_and_still_reach_a_charger(
                 grid, now, [task.pickup, task.dropoff]):
-            return None
-
-        # Phase 23. CRITICAL health means struggling right now -- stuck a
-        # long time, or its radio has gone quiet, or it keeps having to
-        # replan. Doc 23's own maintenance policy says "reduce new task
-        # assignments" before things get worse, so it stops bidding for NEW
-        # work. It still finishes whatever it is already carrying: this only
-        # ever affects which robot a job goes to, never a robot mid-delivery,
-        # and touches nothing about how it drives or gives way.
-        if self.health_band == HEALTH_CRITICAL:
             return None
 
         congestion = self.local_route_congestion(to_pickup, leg, now)
@@ -2771,10 +2770,8 @@ class Robot:
 
     def _pass_the_request_along(self, grid: Grid, now: float, asker: str,
                                 wanted: Cell) -> Optional[str]:
-        neighbours_by_cell = {(n.cell[0], n.cell[1]): n.robot_id
-                              for n in self.fleet.fresh(now)}
         for side in grid.neighbours(self.cell):
-            who = neighbours_by_cell.get((side.x, side.y))
+            who = self._immediate_side_blocker(side, now)
             if who is None or who == asker:
                 continue
             last = self._asked_at.get(who)
@@ -2785,6 +2782,22 @@ class Robot:
             self._pending_ask = (who, side)
             return (f"{self.robot_id} is boxed in - passing {asker}'s request "
                     f"on to {who}")
+        return None
+
+    def _immediate_side_blocker(self, side: Cell, now: float) -> Optional[str]:
+        """Who prevents an immediate one-cell escape onto ``side``?"""
+        pair = (side.x, side.y)
+        for note in self.fleet.fresh(now):
+            if (note.cell == pair or note.next_cell == pair
+                    or note.destination == pair):
+                return note.robot_id
+
+        dwell = 1.0 / max(self.travel_speed(), 0.1)
+        start, end = now - self.CLEARANCE, now + dwell + self.CLEARANCE
+        for key in (node_key(side), edge_key(self.cell, side), target_key(side)):
+            owner = self.table.owner(key, start, end)
+            if owner is not None and owner.robot_id != self.robot_id:
+                return owner.robot_id
         return None
 
     def step_aside(self, grid: Grid, now: float, avoid: List[Cell],
@@ -2800,7 +2813,10 @@ class Robot:
             blocked.add(self.path[0])
 
         blocked |= self.blocked_map.cells(now)
-        options = [c for c in grid.neighbours(self.cell) if c not in blocked]
+        options = [
+            c for c in grid.neighbours(self.cell)
+            if c not in blocked and self._immediate_side_blocker(c, now) is None
+        ]
         if not options:
             return False
 
@@ -2814,6 +2830,10 @@ class Robot:
             self._suspended_goal = self.goal
         self.forget_bookings_soft()
         self.set_goal(spot)
+        # This is an immediate one-cell escape already checked against local
+        # intent and reservations. Install it now; do not announce success and
+        # then let the next tick discover that no route exists.
+        self.path = [spot]
         self.status = RobotStatus.YIELDING
         self._reroute_at = now
         self._resume_at = now + self.ASIDE_PAUSE
@@ -3003,42 +3023,6 @@ class Robot:
                        else RobotStatus.WAITING)
         return f"{self.robot_id} is charged ({self.battery:.0f}%) and back on the job"
 
-    # --------------------------------------------- Phase 23: how it is doing
-
-    HEALTH_RECHECK = 2.0     # seconds between recomputing the score
-
-    def update_health(self, now: float) -> Optional[str]:
-        """Recompute the health score from what this robot has actually
-        measured about itself. Returns a note only when the BAND changes, so
-        the event feed says something when it matters and stays quiet the
-        rest of the time.
-        """
-        if now - self._last_health_check < self.HEALTH_RECHECK:
-            return None
-        self._last_health_check = now
-
-        cutoff = now - INCIDENT_WINDOW
-        while self._reroute_times and self._reroute_times[0] < cutoff:
-            self._reroute_times.popleft()
-        while self._backout_times and self._backout_times[0] < cutoff:
-            self._backout_times.popleft()
-
-        report = compute_health(
-            battery=self.battery,
-            stalled_for=self.stalled_for(now) if self.goal is not None else 0.0,
-            comms_silence=self.link_quiet_for(now),
-            reroutes_recent=len(self._reroute_times),
-            backouts_recent=len(self._backout_times),
-        )
-        was = self.health_band
-        self.health_score, self.health_band, self.health_reasons = (
-            report.score, report.band, report.reasons)
-        if self.health_band == was:
-            return None
-        arrow = "v" if BANDS.index(self.health_band) > BANDS.index(was) else "^"
-        return (f"{self.robot_id} health {was} -> {self.health_band} "
-                f"({self.health_score:.0f}/100) {arrow} {report.sentence()}")
-
     def manage_battery(self, grid: Grid, bus, now: float) -> Optional[str]:
         """Decide about charge. Called once per tick, before anything moves."""
         if self.status is RobotStatus.FAILED or self.halted:
@@ -3138,9 +3122,6 @@ class Robot:
             "robot_id": self.robot_id,
             "halted": self.halted,
             "charging": self.status is RobotStatus.CHARGING,
-            "health_score": round(self.health_score, 1),
-            "health_band": self.health_band,
-            "health_reasons": self.health_reasons,
             "messages_rejected": self.messages_rejected,
             "near_person": self.near_person,
             "staging": [self.staging.x, self.staging.y] if self.staging else None,
@@ -3149,6 +3130,9 @@ class Robot:
             "cell": [self.cell.x, self.cell.y],
             "x": round(self.x, 3),
             "y": round(self.y, 3),
+            # Dashboard may miss snapshots while browser is busy. Sending the
+            # authoritative physical limit lets it catch up without snapping.
+            "travel_speed": round(self.travel_speed(), 3),
             "heading": self.heading,
             "status": self.status.value,
             "battery": round(self.battery, 1),

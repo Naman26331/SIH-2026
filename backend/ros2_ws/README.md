@@ -138,7 +138,6 @@ The names come from `03_ROBOT_AND_ROS2_IMPLEMENTATION.md` §3:
 | `/fleet/task_claims` | `TaskClaim` | claimed / picked up / delivered / released |
 | `/fleet/wait_reports` | `WaitReport` | "I am stuck behind X" — the wait-for graph |
 | `/fleet/yield_requests` | `YieldRequest` | "please move, you are in my way" |
-| `/fleet/operator_goals` | `OperatorGoal` | signed dashboard goal for one robot |
 
 The first seven are the ones named in the design docs. The remaining messages are
 extensions the working system turned out to need — auctions, deadlock detection

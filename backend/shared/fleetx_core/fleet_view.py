@@ -41,7 +41,7 @@ class Neighbour:
     # From the last heartbeat.
     battery: float = 100.0
     status: str = "UNKNOWN"
-    health: str = "OK"
+    position_known: bool = False
 
     # From the last intent message -- the useful part.
     destination: Optional[Tuple[int, int]] = None
@@ -107,6 +107,7 @@ class Neighbour:
     def to_dict(self, now: float, stale_after: float = DEFAULT_STALE_AFTER) -> Dict[str, Any]:
         return {
             "robot_id": self.robot_id,
+            "position_known": self.position_known,
             "x": round(self.x, 3), "y": round(self.y, 3),
             "cell": [self.cell[0], self.cell[1]],
             "velocity": round(self.velocity, 2), "heading": self.heading,
@@ -157,7 +158,6 @@ class FleetView:
         if isinstance(message, Heartbeat):
             note.battery = message.battery
             note.status = message.status
-            note.health = message.health
 
         elif isinstance(message, PoseUpdate):
             # Ignore a message that overtook a newer one on the way here.
@@ -168,6 +168,7 @@ class FleetView:
             note.cell = (message.cell[0], message.cell[1])
             note.velocity = message.velocity
             note.heading = message.heading
+            note.position_known = True
 
         elif isinstance(message, IntentUpdate):
             if message.timestamp < note.last_intent:
@@ -182,6 +183,7 @@ class FleetView:
             note.status = message.status
             note.x, note.y = message.x, message.y
             note.velocity = message.velocity
+            note.position_known = True
 
     # ------------------------------------------------------------- reading
 

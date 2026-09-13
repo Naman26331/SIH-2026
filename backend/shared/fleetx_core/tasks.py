@@ -297,7 +297,11 @@ class TaskBoard:
         order = {TaskStatus.CARRYING: 0, TaskStatus.ASSIGNED: 1,
                  TaskStatus.ANNOUNCED: 2, TaskStatus.QUEUED: 3,
                  TaskStatus.DONE: 4, TaskStatus.FAILED: 5}
-        ranked = sorted(self.tasks.values(),
+        # Completed history is already represented by KPI counters. Sending
+        # DONE rows made every completion reorder and replace the dashboard's
+        # task list for no operational value.
+        ranked = sorted((task for task in self.tasks.values()
+                         if not task.finished),
                         key=lambda t: (order.get(t.status, 9), t.task_id))
         return [t.to_dict() for t in ranked[:limit]]
 

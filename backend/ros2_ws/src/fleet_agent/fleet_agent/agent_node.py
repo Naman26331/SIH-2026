@@ -41,12 +41,10 @@ from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import BatteryState, LaserScan
-from fleet_msgs.msg import OperatorGoal
 
 from . import translate as T
 from .brain import Cell, Robot, RobotStatus, default_grid
 from .ros2_bus import Ros2Bus
-from fleetx_core import security
 
 # How often the brain thinks. The simulator runs at 20 Hz; there is no reason
 # for a real robot to think faster than it can act.
@@ -87,9 +85,6 @@ class FleetAgent(Node):
                            speed=float(p("speed").value))
         self.bus = Ros2Bus(self, self.robot_id)
         self.bus.register(self.robot_id)
-        self._operator_guard = security.ReplayGuard()
-        self.create_subscription(OperatorGoal, "/fleet/operator_goals",
-                                 self.on_operator_goal, 20)
 
         # ---- sensors in ----------------------------------------------------
         sensor_qos = QoSProfile(reliability=ReliabilityPolicy.BEST_EFFORT, depth=5)
@@ -187,26 +182,6 @@ class FleetAgent(Node):
         if math.isfinite(percentage) and percentage >= 0.0:
             self.robot.battery = max(0.0, min(100.0, percentage * 100.0))
 
-    def on_operator_goal(self, msg: OperatorGoal) -> None:
-        """Accept authenticated dashboard goal addressed to this robot."""
-        command = T.ros_to_operator_goal(msg)
-        if command.target_robot != self.robot_id:
-            return
-        verdict = security.check_signature(command)
-        if verdict:
-            verdict = self._operator_guard.check(
-                command.robot_id, command.seq, command.timestamp, self.now(),
-                stream="OPERATOR_GOAL")
-        if not verdict:
-            self.get_logger().warning(f"Rejected operator goal: {verdict.reason}")
-            return
-        target = Cell(*command.target)
-        if not self.grid.is_walkable(target):
-            self.get_logger().warning(f"Rejected non-driveable goal {tuple(target)}")
-            return
-        self.robot.set_goal(target)
-        self.get_logger().info(f"Operator goal: {self.robot_id} -> {tuple(target)}")
-
     # -------------------------------------------------------------- the loop
 
     def think(self) -> None:
@@ -227,11 +202,10 @@ class FleetAgent(Node):
             self.get_logger().info(note)
 
         # Same operational checks as World.tick(), using only this robot's
-        # local state. Network loss slows/stops unsafe work, health remains
-        # current, and physical battery telemetry can trigger charging.
+        # local state. Network loss slows/stops unsafe work, and physical
+        # battery telemetry can trigger charging.
         for note in (
                 self.robot.update_link_health(now),
-                self.robot.update_health(now),
                 self.robot.manage_battery(self.grid, self.bus, now)):
             if note:
                 self.get_logger().info(note)

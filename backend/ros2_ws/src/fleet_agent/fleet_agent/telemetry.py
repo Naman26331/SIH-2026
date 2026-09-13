@@ -161,7 +161,6 @@ class TelemetryProjector:
                 robot = self._ensure_robot(message.robot_id)
                 robot.battery = message.battery
                 robot.status = self._status(message.status)
-                robot.health_band = message.health
 
             elif isinstance(message, PathReservation):
                 self._reservation(message)

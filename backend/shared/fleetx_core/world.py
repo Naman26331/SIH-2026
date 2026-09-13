@@ -274,17 +274,6 @@ class World:
                 })
                 del self.decisions[:-20]
 
-        # Phase 23: how is it doing? Cheap and constant, like the battery
-        # check -- a robot's own honest account of whether it is struggling.
-        for robot in self.robots.values():
-            note = robot.update_health(self.sim_time)
-            if note:
-                self.decisions.append({
-                    "sim_time": round(self.sim_time, 2),
-                    "robot_id": robot.robot_id, "text": note,
-                })
-                del self.decisions[:-20]
-
         # Phase 13: charge. Before jobs on purpose -- a robot that is about to
         # run out should hand its work back BEFORE the auction runs, not after.
         # Not for a centrally-controlled robot: going to charge means setting
@@ -676,7 +665,7 @@ class World:
         else:
             fake = Heartbeat(
                 robot_id=target.robot_id, timestamp=self.sim_time, seq=999999,
-                battery=0.0, status="FAILED", health="CRITICAL")
+                battery=0.0, status="FAILED")
             attempt = (f"a message pretending to be {target.robot_id}, "
                       f"claiming it has failed")
 
@@ -1422,10 +1411,7 @@ class World:
                              if robots else 0.0),
             "avg_warning": (round(sum(self.warning_times) / len(self.warning_times), 2)
                             if self.warning_times else 0.0),
-            # Phase 23
             "messages_rejected": sum(r.messages_rejected for r in robots),
-            "health_critical": sum(1 for r in robots if r.health_band == "CRITICAL"),
-            "health_service_soon": sum(1 for r in robots if r.health_band == "SERVICE_SOON"),
         }
 
     # ---------------------------------------------------------------- output
@@ -1456,7 +1442,7 @@ class World:
                            table=r.table.rows(self.sim_time) if r.table else [],
                            holds=self._held_cells(rid, r),
                            blocked=r.blocked_map.to_rows(self.sim_time) if r.blocked_map else [])
-                      if (focus is None or rid == focus)
+                      if rid == focus
                       else {"owner": rid, "neighbours": [], "table": [],
                             "blocked": [], "holds": self._held_cells(rid, r)})
                 for rid, r in self.robots.items() if r.fleet
@@ -1466,14 +1452,10 @@ class World:
             "tasks": self.board.rows(),
             "wait_graph": (list(self.robots.values())[0].waits.to_rows()
                            if self.robots else []),
-            "decisions": self.decisions[-8:][::-1],
             "bus": self.bus.stats() if hasattr(self.bus, "stats") else {},
             "demand": self.demand_view(),
             "reslotting": self.reslotter.to_dict(self.sim_time),
             "humans": [h.to_dict() for h in self.humans.values()],
-            "messages": [
-                m.to_dict() for m in list(getattr(self.bus, "recent", []))[-14:]
-            ][::-1],
             "kpis": self.kpis(),
         }
 

@@ -77,7 +77,7 @@
     flex:1; min-width:0; position:relative; display:flex;
     align-items:center; justify-content:center; padding:18px; background:var(--bg);
   }
-  canvas{display:block; border-radius:6px; cursor:crosshair; touch-action:none}
+  canvas{display:block; border-radius:6px; cursor:default; touch-action:none}
   .hint{
     position:absolute; left:50%; bottom:10px; transform:translateX(-50%);
     background:rgba(16,22,31,.94); border:1px solid var(--border); border-radius:20px;
@@ -165,11 +165,6 @@
   .legend div{display:flex; align-items:center; gap:9px; color:var(--muted)}
   .sw{width:12px;height:12px;border-radius:3px;flex:none;border:1px solid rgba(255,255,255,.07)}
 
-  .log{font-family:var(--mono); font-size:11px; display:flex; flex-direction:column; gap:4px}
-  .log div{color:var(--muted); display:flex; gap:7px; line-height:1.45}
-  .log time{color:var(--dim); flex:none}
-  .log div.crash span{color:var(--red)}
-  .log.empty{color:var(--dim)}
 
   /* ---------- Phase 9: real jobs ---------- */
   .badge.FAILED{background:rgba(248,113,113,.2); color:var(--red)}
@@ -194,17 +189,10 @@
   .why{color:var(--muted); line-height:1.4; margin-top:6px}
   .why b{color:#A78BFA}
   #batts{max-height:180px; overflow-y:auto}
-  #healths{max-height:170px; overflow-y:auto; font-size:11px}
   #people{max-height:140px; overflow-y:auto; font-size:11px}
   .prow{display:flex; align-items:center; gap:6px; padding:2px 0}
   .prow b{width:26px; flex:none; color:#F5A623}
   .prow .st{flex:1; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
-  .hrow{display:flex; align-items:center; gap:6px; padding:2px 0}
-  .hrow b{width:26px; flex:none}
-  .hrow .dot{width:8px; height:8px; border-radius:50%; flex:none}
-  .hrow .band{width:88px; flex:none; font-size:10px}
-  .hrow .why{color:var(--muted); flex:1; overflow:hidden; text-overflow:ellipsis;
-             white-space:nowrap; font-size:10px}
   #security{font-size:11px; color:var(--muted); line-height:1.5}
   #security b{color:var(--text)}
   .batt{display:flex; align-items:center; gap:6px; font-size:11px; padding:1px 0}
@@ -220,8 +208,6 @@
   .power{display:grid; grid-template-columns:repeat(3,1fr); gap:6px; max-height:150px; overflow-y:auto}
   .power button{font-size:11px; padding:6px 4px}
   .power button.dead{border-color:var(--red); color:var(--red); background:rgba(248,113,113,.10)}
-  .log div.order span{color:var(--cyan)}
-  .log div.task span{color:var(--green)}
 
   /* ---------- Phase 14: network down ---------- */
   .badge.SAFE_MODE{background:rgba(245,184,65,.2); color:var(--amber)}
@@ -248,7 +234,6 @@
   .blocks{font-family:var(--mono); font-size:10.5px; display:flex; flex-direction:column; gap:3px}
   .blocks div{display:flex; gap:6px; color:var(--muted)}
   .blocks .none{color:var(--dim)}
-  .log div.found span{color:var(--red)}
 
   /* ---------- Phase 7: breaking jams ---------- */
   .badge.YIELDING{background:rgba(52,211,153,.16); color:var(--green)}
@@ -256,7 +241,6 @@
   .waitg div{display:flex; gap:6px; color:var(--muted)}
   .waitg .none{color:var(--dim)}
   .waitg b{font-weight:700}
-  .log div.jam span{color:var(--green)}
 
   /* ---------- Phase 6: negotiation ---------- */
   .badge.REROUTING{background:rgba(167,139,250,.16); color:var(--violet)}
@@ -272,7 +256,6 @@
   .slotmoves time{color:var(--dim); flex:none}
   .slotmoves .none{color:var(--dim)}
   .slotmoves .gain{color:var(--green)}
-  .log div.gave span{color:var(--violet)}
 
   /* ---------- Phase 5: reservations ---------- */
   .rtable{font-family:var(--mono); font-size:10.5px; display:flex; flex-direction:column; gap:2px}
@@ -306,8 +289,6 @@
   .conf .kind{font-size:9px; letter-spacing:.06em; color:var(--dim)}
   .noconf{color:var(--dim); font-family:var(--mono); font-size:11px}
 
-  .log div.pred span{color:var(--amber)}
-  .log div.slot span{color:var(--amber)}
 
   /* ---------- Phase 3: comms ---------- */
   .toggles{display:flex; flex-direction:column; gap:6px}
@@ -387,7 +368,7 @@
   <main>
     <div class="mapwrap">
       <canvas id="cv"></canvas>
-      <div class="hint" id="hint">Pick a robot on the right, then click a floor square to send it there</div>
+      <div class="hint" id="hint">Hover over warehouse cells for details</div>
       <div class="eta" id="eta"></div>
     </div>
 
@@ -409,11 +390,6 @@
           <button class="wide" id="drainBtn">&#9211; Drain batteries</button>
         </div>
         <div id="batts"></div>
-      </div>
-
-      <div class="sec">
-        <h2>Robot health <em id="healthNote"></em></h2>
-        <div id="healths"></div>
       </div>
 
 
@@ -456,10 +432,6 @@
 
 
 
-      <div class="sec">
-        <h2>Event feed</h2>
-        <div class="log empty" id="log">waiting for the first event&hellip;</div>
-      </div>
     </aside>
   </main>
 </div>
@@ -517,7 +489,6 @@ function shelfAt(cell){
 let STATE = null;          // latest fleet snapshot
 let CELL = 24, OX = 0, OY = 0;
 let hover = null;
-let selected = "R1";       // which robot your clicks control
 const MOTION_MS = 100;      // backend positions arrive at 10 Hz
 const ROBOT_MOTION = new Map();
 
@@ -545,26 +516,22 @@ function updateRobotMotion(before, after, at){
     }
     if (old.x === next.x && old.y === next.y) continue;
     const shown = robotVisual(old, at);
-    const teleported = Math.hypot(next.x-old.x, next.y-old.y) > 2;
+    const distance = Math.hypot(next.x-shown.x, next.y-shown.y);
+    const speed = Math.max(0.1, next.travel_speed || old.travel_speed || 2.5);
+    // A delayed packet may put truth several cells ahead. Catch up at the
+    // robot's real speed; never hide delay with a visual teleport.
+    const duration = Math.max(MOTION_MS, distance / speed * 1000);
     ROBOT_MOTION.set(next.robot_id, {
-      fromX: teleported ? next.x : shown.x,
-      fromY: teleported ? next.y : shown.y,
-      toX: next.x, toY: next.y, started: at, duration: MOTION_MS,
+      fromX: shown.x, fromY: shown.y,
+      toX: next.x, toY: next.y, started: at, duration,
     });
   }
   for (const id of ROBOT_MOTION.keys()) if (!live.has(id)) ROBOT_MOTION.delete(id);
 }
 
-// The dashboard only ever shows one robot's world-picture at a time, so ask
-// the server for just that one. Sending all of them was 78% of the traffic.
-function sendFocus(){
-  fetch("/api/focus", {method:"POST", headers:{"Content-Type":"application/json"},
-                       body: JSON.stringify({robot_id: selected})}).catch(() => {});
-}
 let lastCollisions = 0;
 const seenEvents = new Set();   // collision ids already logged
 const bursts = [];              // red flashes currently animating
-const events = [];
 
 // Stamped by the server when it handed this page over. If the live stamp ever
 // differs, this tab is running old code.
@@ -623,7 +590,6 @@ async function boot(){
   buildShelfIndex();
   layout();
   bindRate();
-  sendFocus();
   connect();
   requestAnimationFrame(draw);
 }
@@ -651,12 +617,6 @@ function receiveState(raw){
   STATE = next;
   setLive(true);
 
-  // If the watched robot vanished, fall back to the first live robot.
-  if (STATE.robots.length && !STATE.robots.some(r => r.robot_id === selected)){
-    selected = STATE.robots[0].robot_id;
-    sendFocus();
-  }
-
   const now = performance.now();
   if (now - lastPanels < PANEL_MS) { watchAll(prev); return; }
   lastPanels = now;
@@ -666,7 +626,6 @@ function receiveState(raw){
   renderBlocks();
   renderNetwork();
   renderRate();
-  renderHealth();
   watchAll(prev);
 }
 
@@ -701,11 +660,7 @@ function applyStatePatch(base, patch){
   }
   return out;
 }
-// Things that must see EVERY update or they miss an event entirely.
 function watchAll(prev){
-  watchForEvents(prev, STATE);
-  watchConflicts(STATE);
-  watchDecisions(STATE);
   watchReslotting(STATE);
   catchCollisions(STATE);
 }
@@ -770,7 +725,7 @@ function draw(){
       ctx.drawImage(STATIC_LAYER, 0, 0);
       ctx.restore();
     }
-    if (STATE){ drawBookings(); drawObstacles(); drawJobs(); drawStaging(); drawBeliefs(); drawPaths(); drawGoals(); drawConflicts(); drawHumans(); drawRobots(); }
+    if (STATE){ drawBookings(); drawObstacles(); drawJobs(); drawStaging(); drawPaths(); drawGoals(); drawConflicts(); drawHumans(); drawRobots(); }
     drawBursts();
     drawHover();
   }
@@ -918,7 +873,7 @@ function drawPaths(){
     const col = colorFor(r.robot_id);
     ctx.save();
     ctx.strokeStyle = col;
-    ctx.globalAlpha = (r.robot_id === selected) ? .60 : .30;
+    ctx.globalAlpha = .42;
     ctx.lineWidth = Math.max(2, CELL*0.12);
     ctx.lineCap="round"; ctx.lineJoin="round";
     ctx.setLineDash([CELL*0.28, CELL*0.28]);
@@ -992,25 +947,18 @@ function drawJobs(){
 }
 
 // ---- Phase 8: things in the way ----
-// Solid = actually on the floor. A red outline means the SELECTED robot knows
-// about it. An obstacle nobody has driven near yet is drawn faintly: it is
-// really there, but no robot has found it.
 function drawObstacles(){
   const real = STATE.obstacles || [];
-  const view = (STATE.views || {})[selected];
-  const known = new Set((view && view.blocked || []).map(b => b.cell.join(",")));
-  const t = performance.now() / 1000;
 
   for (const [ox, oy] of real){
     const px = ox*CELL, py = oy*CELL;
-    const seen = known.has(`${ox},${oy}`);
     ctx.save();
-    ctx.globalAlpha = seen ? 0.95 : 0.35;
+    ctx.globalAlpha = 0.95;
     ctx.fillStyle = "#7F1D1D";
     ctx.fillRect(px+1, py+1, CELL-2, CELL-2);
 
     // hazard hatching
-    ctx.strokeStyle = seen ? "#FCA5A5" : "#B45454";
+    ctx.strokeStyle = "#FCA5A5";
     ctx.lineWidth = Math.max(1, CELL*0.07);
     ctx.beginPath();
     for (let k = -CELL; k < CELL; k += Math.max(4, CELL*0.28)){
@@ -1019,25 +967,8 @@ function drawObstacles(){
     }
     ctx.save(); ctx.rect(px+1, py+1, CELL-2, CELL-2); ctx.clip(); ctx.stroke(); ctx.restore();
 
-    if (seen){
-      ctx.globalAlpha = 0.6 + 0.4*Math.sin(t*3);
-      ctx.strokeStyle = C.red; ctx.lineWidth = 2;
-      ctx.strokeRect(px+1.5, py+1.5, CELL-3, CELL-3);
-    }
-    ctx.restore();
-  }
-
-  // A square the selected robot BELIEVES is blocked but which is not really
-  // there any more -- out of date knowledge, waiting to expire.
-  const realSet = new Set(real.map(c => c.join(",")));
-  for (const b of (view && view.blocked) || []){
-    const key = b.cell.join(",");
-    if (realSet.has(key)) continue;
-    const [ox, oy] = b.cell;
-    ctx.save();
-    ctx.globalAlpha = .35; ctx.strokeStyle = C.red; ctx.lineWidth = 1.5;
-    ctx.setLineDash([3,3]);
-    ctx.strokeRect(ox*CELL+2, oy*CELL+2, CELL-4, CELL-4);
+    ctx.strokeStyle = C.red; ctx.lineWidth = 2;
+    ctx.strokeRect(px+1.5, py+1.5, CELL-3, CELL-3);
     ctx.restore();
   }
 }
@@ -1050,19 +981,12 @@ function drawBookings(){
   for (const r of STATE.robots){
     const view = views[r.robot_id];
     if (!view || !view.holds) continue;
-    const mine = r.robot_id === selected;
     const col = colorFor(r.robot_id);
     ctx.save();
-    ctx.globalAlpha = mine ? .20 : .09;
+    ctx.globalAlpha = .12;
     ctx.fillStyle = col;
     for (const [bx, by] of view.holds){
       ctx.fillRect(bx*CELL+1, by*CELL+1, CELL-2, CELL-2);
-    }
-    if (mine){
-      ctx.globalAlpha = .35; ctx.strokeStyle = col; ctx.lineWidth = 1;
-      for (const [bx, by] of view.holds){
-        ctx.strokeRect(bx*CELL+1.5, by*CELL+1.5, CELL-3, CELL-3);
-      }
     }
     ctx.restore();
   }
@@ -1117,50 +1041,6 @@ function drawConflicts(){
   }
 }
 
-// ---- Phase 3: draw what the SELECTED robot believes about the others ----
-// This is the point of decentralised. R1's picture of R2 is not R2 -- it is
-// whatever R2 last managed to shout, which may be old or may never have arrived.
-function drawBeliefs(){
-  const view = (STATE.views || {})[selected];
-  if (!view) return;
-
-  for (const n of view.neighbours){
-    const col = colorFor(n.robot_id);
-    const gx = n.x*CELL + CELL/2, gy = n.y*CELL + CELL/2;
-
-    // the route it CLAIMS it will take
-    if (n.planned_nodes.length && !n.stale){
-      ctx.save();
-      ctx.strokeStyle = col; ctx.globalAlpha = .17;
-      ctx.lineWidth = Math.max(1.5, CELL*0.09);
-      ctx.setLineDash([CELL*0.16, CELL*0.22]);
-      ctx.lineCap="round"; ctx.lineJoin="round";
-      ctx.beginPath();
-      ctx.moveTo(gx, gy);
-      for (const [px,py] of n.planned_nodes) ctx.lineTo(px*CELL+CELL/2, py*CELL+CELL/2);
-      ctx.stroke();
-      ctx.restore();
-    }
-
-    // where it is BELIEVED to be -- hollow, faded, and greyed out if stale
-    ctx.save();
-    ctx.globalAlpha = n.stale ? .30 : .48;
-    ctx.strokeStyle = n.stale ? C.red : col;
-    ctx.lineWidth = 1.5;
-    ctx.setLineDash(n.stale ? [3,3] : [5,3]);
-    ctx.beginPath(); ctx.arc(gx, gy, CELL*0.46, 0, Math.PI*2); ctx.stroke();
-    ctx.setLineDash([]);
-    if (CELL >= 16){
-      ctx.globalAlpha = n.stale ? .7 : .55;
-      ctx.fillStyle = n.stale ? C.red : col;
-      ctx.font = `600 ${Math.floor(CELL*0.28)}px ui-monospace,Menlo,monospace`;
-      ctx.textAlign="center"; ctx.textBaseline="top";
-      ctx.fillText(n.stale ? "STALE "+n.age+"s" : n.age+"s", gx, gy + CELL*0.5);
-    }
-    ctx.restore();
-  }
-}
-
 const NOSE = { N:[0,-1], E:[1,0], S:[0,1], W:[-1,0] };
 
 function drawRobots(){
@@ -1178,18 +1058,9 @@ function drawRobots(){
                      : r.status==="REROUTING" ? "#A78BFA"
                      : r.status==="YIELDING" ? C.green
                      : r.status==="SAFE_MODE" ? C.amber : null;
-    const isSel = r.robot_id === selected;
-
     ctx.save();
     ctx.globalAlpha = .16; ctx.fillStyle = col;
     ctx.beginPath(); ctx.arc(cx, cy, rad*2.0, 0, Math.PI*2); ctx.fill();
-
-    if (isSel){                                   // ring on the one you control
-      ctx.globalAlpha = .5; ctx.strokeStyle = col; ctx.lineWidth = 1.5;
-      ctx.setLineDash([3,3]);
-      ctx.beginPath(); ctx.arc(cx, cy, rad*1.55, 0, Math.PI*2); ctx.stroke();
-      ctx.setLineDash([]);
-    }
 
     ctx.globalAlpha = 1;
     ctx.fillStyle = "#0A0E13";
@@ -1248,7 +1119,6 @@ function catchCollisions(state){
     seenEvents.add(e.id);
     bursts.push({x:e.x, y:e.y, born:performance.now()});
     const tag = e.predicted ? ` (called ${e.warning}s early)` : " (NOT predicted)";
-    log(`${e.robots.join(" and ")} COLLIDED at (${Math.round(e.x)}, ${Math.round(e.y)})${tag}`, true);
   }
 }
 
@@ -1282,7 +1152,7 @@ function drawHover(){
   if (!hover) return;
   const walk = MAP.cells[hover.y][hover.x] !== "SHELF";
   ctx.save();
-  ctx.strokeStyle = walk ? colorFor(selected) : C.red;
+  ctx.strokeStyle = walk ? "#22D3EE" : C.red;
   ctx.globalAlpha = .85; ctx.lineWidth = 2;
   ctx.strokeRect(hover.x*CELL+1.5, hover.y*CELL+1.5, CELL-3, CELL-3);
   ctx.restore();
@@ -1309,20 +1179,11 @@ function showEta(evt){
   const box = document.getElementById("eta");
   if (!hover || !STATE){ box.style.display = "none"; return; }
 
-  const view = (STATE.views || {})[selected];
-  const me = STATE.robots.find(r => r.robot_id === selected);
   const rows = [];
 
-  if (me){
-    const i = me.path.findIndex(p => p[0]===hover.x && p[1]===hover.y);
-    if (i >= 0) rows.push({id:selected, eta:(i+1)/2.5, mine:true});
-  }
-  if (view){
-    for (const n of view.neighbours){
-      if (n.stale) continue;
-      const i = n.planned_nodes.findIndex(p => p[0]===hover.x && p[1]===hover.y);
-      if (i >= 0) rows.push({id:n.robot_id, eta:n.node_etas[i], mine:false});
-    }
+  for (const r of STATE.robots){
+    const i = r.path.findIndex(p => p[0]===hover.x && p[1]===hover.y);
+    if (i >= 0) rows.push({id:r.robot_id, eta:(i+1)/2.5});
   }
 
   // Phase 11. Hovering a rack tells you its name and what is on it, and
@@ -1356,7 +1217,7 @@ function showEta(evt){
   box.innerHTML =
     `<div style="color:#7A8899">square (${hover.x}, ${hover.y})</div>` +
     rows.map(r =>
-      `<div><b style="color:${colorFor(r.id)}">${r.id}</b> arrives in ${r.eta.toFixed(1)}s${r.mine?" (you)":""}</div>`
+      `<div><b style="color:${colorFor(r.id)}">${r.id}</b> arrives in ${r.eta.toFixed(1)}s</div>`
     ).join("") +
     (clash ? `<div class="warnrow">&#9888; both within 1s &mdash; this is a crash</div>` : "");
   box.style.display = "block";
@@ -1366,12 +1227,12 @@ function showEta(evt){
 let dropMode = false;
 cv.addEventListener("click", e => {
   const c = cellAt(e); if (!c) return;
-  if (dropMode) dropObstacle(c.x, c.y); else sendTo(c.x, c.y);
+  if (dropMode) dropObstacle(c.x, c.y);
 });
 
 async function dropObstacle(x, y){
   const out = await post("/api/obstacle", {action: "toggle", x, y});
-  showHint(out.message); log(out.message);
+  showHint(out.message);
 }
 
 document.getElementById("dropMode").addEventListener("click", () => {
@@ -1379,10 +1240,10 @@ document.getElementById("dropMode").addEventListener("click", () => {
   const el = document.getElementById("dropMode");
   el.classList.toggle("on", dropMode);
   el.querySelector(".st").textContent = dropMode ? "ON" : "OFF";
-  cv.style.cursor = dropMode ? "cell" : "crosshair";
+  cv.style.cursor = dropMode ? "cell" : "default";
   showHint(dropMode
     ? "Click an aisle to drop something in it. Click it again to pick it up."
-    : "Back to sending robots. Click a floor square.");
+    : "Obstacle placement off.");
 });
 
 let netDown = false;
@@ -1392,17 +1253,17 @@ document.getElementById("cutNet").addEventListener("click", async () => {
   const b = document.getElementById("cutNet");
   b.textContent = netDown ? "\u2713 Restore the network" : "\ud83d\udcf5 Cut the network";
   b.classList.toggle("on", netDown);
-  showHint(out.message); log(out.message);
+  showHint(out.message);
 });
 
 document.getElementById("clearObs").addEventListener("click", async () => {
   const out = await post("/api/obstacle", {action: "clear"});
-  showHint(out.message); log(out.message);
+  showHint(out.message);
 });
 
 document.getElementById("drainBtn").addEventListener("click", async () => {
   const out = await post("/api/battery", {});
-  showHint(out.message); log(out.message);
+  showHint(out.message);
 });
 
 async function post(url, body){
@@ -1411,14 +1272,6 @@ async function post(url, body){
     body: JSON.stringify(body || {})
   });
   return res.json();
-}
-
-async function sendTo(x, y){
-  const out = await post("/api/goal", {robot_id:selected, x, y});
-  showHint(out.ok
-    ? `<b style="color:${colorFor(selected)}">${selected}</b> &rarr; (${x}, ${y})`
-    : out.message);
-  log(out.ok ? `${selected} sent to (${x}, ${y})` : out.message);
 }
 
 function showHint(html){
@@ -1432,14 +1285,14 @@ function showHint(html){
 document.querySelectorAll("[data-scen]").forEach(btn => {
   btn.addEventListener("click", async () => {
     const out = await post("/api/scenario", {name: btn.dataset.scen});
-    showHint(out.message); log(out.message);
-    bursts.length = 0; seenConflicts.clear(); lastDecisionTime = -1;
+    showHint(out.message);
+    bursts.length = 0;
   });
 });
 document.getElementById("resetBtn").addEventListener("click", async () => {
   const out = await post("/api/reset", {});
   seenEvents.clear(); bursts.length = 0; lastCollisions = 0;
-  showHint(out.message); log(out.message);
+  showHint(out.message);
 });
 
 // ------------------------------------------- Phase 6: who gave way
@@ -1557,14 +1410,6 @@ function renderReslotting(){
         : `<div class="none">nothing has needed to move yet</div>`));
 }
 
-// Phase 23a. A colour per health band -- the same idea as the battery bar,
-// green to red, so a struggling robot is visible at a glance before you even
-// read the number.
-const HEALTH_COLOUR = {
-  HEALTHY: "#34D399", WARNING: "#F5B841",
-  SERVICE_SOON: "#FB923C", CRITICAL: "#F87171",
-};
-
 // Phase 22. Each person, and -- in plain words -- which robot, if any, is
 // currently easing off or stopped for them. The robot side already explains
 // itself via near_person; this just reads that back per person.
@@ -1590,28 +1435,7 @@ function renderPeople(){
     : `<div class="none">nobody on the floor — press + Add person</div>`);
 }
 
-function renderHealth(){
-  const robots = STATE.robots || [];
-  const worst = robots.filter(r => r.health_band !== "HEALTHY").length;
-  document.getElementById("healthNote").textContent = worst
-    ? `— ${worst} robot${worst > 1 ? "s" : ""} worth a look`
-    : "— the whole fleet is healthy";
-
-  setHTML("healths", robots.length
-    ? robots.slice().sort((a, b) => a.health_score - b.health_score).map(r => `
-      <div class="hrow">
-        <b style="color:${colorFor(r.robot_id)}">${r.robot_id}</b>
-        <span class="dot" style="background:${HEALTH_COLOUR[r.health_band] || "#7A8899"}"></span>
-        <span class="band" style="color:${HEALTH_COLOUR[r.health_band] || "var(--muted)"}">${
-          r.health_band} ${r.health_score.toFixed(0)}</span>
-        <span class="why">${(r.health_reasons || []).join("; ") || "nothing to report"}</span>
-      </div>`).join("")
-    : `<div class="none">no robots</div>`);
-}
-
-// Phase 23b. What the security layer has actually caught. Numbers only --
-// the plain-English "who rejected what" already lives in the event feed
-// above, this just says how much of it there has been.
+// What the security layer has actually caught.
 function renderSecurity(){
   const k = STATE.kpis || {};
   const rejected = k.messages_rejected || 0;
@@ -1657,21 +1481,14 @@ function renderNetwork(){
 }
 
 function renderBlocks(){
-  const view = (STATE.views || {})[selected];
-  const rows = (view && view.blocked) || [];
-  const real = (STATE.obstacles || []).length;
-  document.getElementById("obsNote").textContent =
-    `— ${real} on the floor, ${rows.length} known to ${selected}`;
+  const rows = STATE.obstacles || [];
+  document.getElementById("obsNote").textContent = `— ${rows.length} on the floor`;
   setHTML("blocks", rows.length
-    ? rows.map(b => `<div>
+    ? rows.map(cell => `<div>
         <span style="color:var(--red)">&#9646;</span>
-        <span>(${b.cell[0]}, ${b.cell[1]})</span>
-        <span style="color:var(--dim)">found by ${b.reported_by}</span>
-        <span style="margin-left:auto;color:var(--dim)">${
-          b.remaining == null ? "until cleared" : `temporary ${b.remaining}s`
-        }</span>
+        <span>(${cell[0]}, ${cell[1]})</span>
       </div>`).join("")
-    : `<div class="none">${selected} knows of nothing in the way</div>`);
+    : `<div class="none">nothing in the way</div>`);
 }
 
 function renderWaitGraph(){
@@ -1684,38 +1501,6 @@ function renderWaitGraph(){
         <span style="margin-left:auto;color:var(--dim)">${r.waiting}s</span>
       </div>`).join("")
     : `<div class="none">nobody is waiting for anybody</div>`);
-}
-
-function renderDecisions(){
-  const list = STATE.decisions || [];
-  document.getElementById("decNote").textContent =
-    `— ${STATE.kpis.reroutes} reroute${STATE.kpis.reroutes === 1 ? "" : "s"}`;
-  setHTML("decisions", list.length
-    ? list.map(d => `<div><time>${d.sim_time.toFixed(1)}s</time><span>${d.text}</span></div>`).join("")
-    : `<div class="none">nobody has had to give way yet</div>`);
-}
-
-// ---------------------------------------------- Phase 5: booking table
-function renderReservations(){
-  const view = (STATE.views || {})[selected];
-  const rows = (view && view.table) || [];
-  document.getElementById("resNote").textContent = `— as ${selected} sees it`;
-
-  const el = document.getElementById("rtable");
-  el.innerHTML = rows.length
-    ? `<div class="hd"><span class="o">WHO</span><span class="w">WHERE</span><span class="t">TIME</span><span class="g"></span></div>` +
-      rows.map(r => `<div class="${r.granted ? "" : "no"}">
-        <span class="o" style="color:${colorFor(r.robot_id)}">${r.robot_id}</span>
-        <span class="w">${r.where}</span>
-        <span class="t">${r.start.toFixed(1)}–${r.end.toFixed(1)}</span>
-        <span class="g">${r.granted ? "✓" : "✕"}</span>
-      </div>`).join("")
-    : `<div style="color:var(--dim)">nothing booked</div>`;
-
-  const stuck = STATE.stuck || [];
-  document.getElementById("stuckBox").innerHTML = stuck.length
-    ? `<div class="stuck">&#9888; <b>${stuck.join(", ")}</b> stuck waiting &mdash; deadlock. Phases 6&ndash;7 fix this.</div>`
-    : "";
 }
 
 // ------------------------------------------------ Phase 4: conflict list
@@ -1776,7 +1561,7 @@ function bindRate(){
   el.addEventListener("input", () => show(el.value));
   el.addEventListener("change", async () => {
     const out = await post("/api/rate", {every: secondsFor(el.value)});
-    showHint(out.message); log(out.message);
+    showHint(out.message);
   });
   show(el.value);
 }
@@ -1794,55 +1579,6 @@ function bindNetwork(){
     document.getElementById("latVal").textContent = lat.value + "ms"; });
   loss.addEventListener("change", push);
   lat.addEventListener("change", push);
-}
-
-function renderSees(){
-  document.getElementById("viewOwner").textContent = selected;
-  document.getElementById("viewOwner").style.color = colorFor(selected);
-  const view = (STATE.views || {})[selected];
-  const el = document.getElementById("sees");
-  if (!view || !view.neighbours.length){
-    el.innerHTML = `<span class="see">hears nobody yet</span>`;
-  } else {
-    el.innerHTML = view.neighbours.map(n =>
-      `<span class="see ${n.stale?"stale":"ok"}">${n.robot_id} ${n.stale?"STALE":"\u2713"} ${n.age}s${n.missed?` \u00b7 ${n.missed} lost`:""}</span>`
-    ).join("");
-  }
-
-  // Every message type gets its own line. The ticker knew about only three,
-  // so the eight added since all fell through to the battery line and printed
-  // "undefined% undefined" -- and the long names overflowed their column and
-  // ran into the robot id.
-  const DESCRIBE = {
-    POSE_UPDATE:      m => `(${m.x.toFixed(1)}, ${m.y.toFixed(1)}) v=${m.velocity}`,
-    INTENT_UPDATE:    m => m.destination
-        ? `heading for (${m.destination[0]},${m.destination[1]}), eta ${m.eta_destination ?? "?"}s`
-        : "no destination",
-    HEARTBEAT:        m => `${m.battery}% ${m.status}`,
-    CONFLICT_ALERT:   m => `${m.robot_a}/${m.robot_b} both want (${m.resource[0]},${m.resource[1]}) in ${m.estimated_time}s`,
-    PATH_RESERVATION: m => `${m.action === "CLAIM" ? "books" : "frees"} (${m.cells[0]},${m.cells[1]}) for ${m.start.toFixed(1)}-${m.end.toFixed(1)}s`,
-    BLOCKED_AISLE:    m => `(${m.cell[0]},${m.cell[1]}) ${m.cleared ? "is clear again" : "is blocked"}`,
-    WAIT_REPORT:      m => m.blocked_by ? `stuck behind ${m.blocked_by} (${m.waiting}s)` : "moving freely",
-    YIELD_REQUEST:    m => `asks ${m.target} to move off (${m.resource[0]},${m.resource[1]})`,
-    TASK_ANNOUNCE:    m => `${m.task_id}: ${m.product} from ${shelfAt(m.pickup) || `(${m.pickup[0]},${m.pickup[1]})`}`,
-    TASK_BID:         m => `${m.task_id} would cost ${m.cost}`,
-    TASK_CLAIM:       m => `${m.task_id} ${String(m.action).toLowerCase()}`,
-  };
-  const SHORT = {
-    POSE_UPDATE: "POS", INTENT_UPDATE: "INTENT", HEARTBEAT: "ALIVE",
-    CONFLICT_ALERT: "CONFLICT", PATH_RESERVATION: "BOOK",
-    BLOCKED_AISLE: "BLOCKED", WAIT_REPORT: "STUCK", YIELD_REQUEST: "MOVE?",
-    TASK_ANNOUNCE: "ORDER", TASK_BID: "BID", TASK_CLAIM: "JOB",
-  };
-  setHTML("msgs", (STATE.messages || []).map(m => {
-    let extra;
-    try { extra = (DESCRIBE[m.type] || (() => m.type))(m); }
-    catch (err) { extra = "(unreadable)"; }
-    return `<div class="${m.type}">
-      <span class="mt">${SHORT[m.type] || m.type}</span>
-      <span class="who" style="color:${colorFor(m.robot_id)}">${m.robot_id}</span>
-      <span>${extra}</span></div>`;
-  }).join(""));
 }
 
 // ---------------------------------------------------------------- panels
@@ -1875,16 +1611,10 @@ function renderRobots(){
     const col = colorFor(r.robot_id);
     const bcls = r.battery>50 ? "" : r.battery>20 ? "warn" : "bad";
     const goal = r.goal ? `${r.goal[0]}, ${r.goal[1]}` : "&mdash;";
-    const sel = r.robot_id === selected;
-    return `<div class="robot ${sel?"sel":""}" data-rid="${r.robot_id}" style="border-left-color:${col}">
+    return `<div class="robot" style="border-left-color:${col}">
       <div class="row1">
         <span class="rid" style="color:${col}">${r.robot_id}</span>
         <span class="badge ${r.status}">${r.status}</span>
-        ${r.health_band !== "HEALTHY" ? `<span class="badge" style="background:${
-          HEALTH_COLOUR[r.health_band]}22;color:${HEALTH_COLOUR[r.health_band]};border-color:${
-          HEALTH_COLOUR[r.health_band]}55" title="${(r.health_reasons||[]).join('; ')}">${
-          r.health_band}</span>` : ""}
-        <span class="pick">${sel ? "controlling" : "select"}</span>
       </div>
       <div class="prio">priority <b>${(r.priority/10).toFixed(1)}</b>${
         r.priority > 50 ? ` <span class="up">&uarr;+${((r.priority-50)/10).toFixed(1)}</span>` : ""
@@ -1916,122 +1646,6 @@ function renderScenario(){
        halted. Press Start orders or Free roam to release.</div>` : "");
   document.querySelectorAll("[data-scen]").forEach(b =>
     b.classList.toggle("on", b.dataset.scen === STATE.scenario));
-}
-
-let lastDecisionTime = -1;
-function watchDecisions(state){
-  for (const d of [...(state.decisions || [])].reverse()){
-    if (d.sim_time > lastDecisionTime){
-      lastDecisionTime = d.sim_time;
-      if (/^ORDER /.test(d.text)) logOrder(d.text);
-      else if (/^moved /.test(d.text)) logSlot(d.text);
-      else if (/auction|collected|delivered|gave up|back up for auction/.test(d.text)) logTask(d.text);
-      else if (/blocking|is clear again|expired/.test(d.text)) logFound(d.text);
-      else if (/asked|boxed in|stepped aside|moving aside|back on the job/.test(d.text)) logJam(d.text);
-      else logGave(d.text);
-    }
-  }
-}
-
-const seenConflicts = new Map();
-function watchConflicts(state){
-  const live = new Set();
-  for (const c of (state.conflicts || [])){
-    const key = [c.robot_a, c.robot_b, c.cell[0], c.cell[1]].sort().join("|");
-    live.add(key);
-    if (!seenConflicts.has(key)){
-      seenConflicts.set(key, true);
-      logPred(`CONFLICT ${c.robot_a}/${c.robot_b} at (${c.cell[0]},${c.cell[1]}) in ${c.lead_time.toFixed(1)}s`);
-    }
-  }
-  for (const key of [...seenConflicts.keys()]) if (!live.has(key)) seenConflicts.delete(key);
-}
-
-function watchForEvents(prev, now){
-  if (!prev) return;
-  const before = new Map(prev.robots.map(r => [r.robot_id, r]));
-  for (const r of now.robots){
-    const b = before.get(r.robot_id); if (!b) continue;
-    if (b.status !== r.status){
-      if (r.status === "IDLE" && b.status === "MOVING")
-        log(`${r.robot_id} arrived at (${r.cell[0]}, ${r.cell[1]})`);
-      if (r.status === "BLOCKED") log(`${r.robot_id} BLOCKED - no route exists`);
-      if (r.status === "WAITING" && r.blocked_by)
-        log(`${r.robot_id} stopped short - (${r.path[0] ? r.path[0][0]+","+r.path[0][1] : "?"}) is held by ${r.blocked_by}`);
-    }
-  }
-}
-
-function logLine(msg, cls){
-  if (!msg) return;
-  const d = new Date();
-  const t = [d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
-  events.unshift(`<div class="${cls}"><time>${t}</time><span>${msg}</span></div>`);
-  events.length = Math.min(events.length, 16);
-  const el = document.getElementById("log");
-  el.classList.remove("empty"); el.innerHTML = events.join("");
-}
-const logOrder = (m) => logLine(m, "order");
-const logTask  = (m) => logLine(m, "task");
-
-function logFound(msg){
-  if (!msg) return;
-  const d = new Date();
-  const t = [d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
-  events.unshift(`<div class="found"><time>${t}</time><span>${msg}</span></div>`);
-  events.length = Math.min(events.length, 16);
-  const el = document.getElementById("log");
-  el.classList.remove("empty"); el.innerHTML = events.join("");
-}
-
-function logJam(msg){
-  if (!msg) return;
-  const d = new Date();
-  const t = [d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
-  events.unshift(`<div class="jam"><time>${t}</time><span>${msg}</span></div>`);
-  events.length = Math.min(events.length, 16);
-  const el = document.getElementById("log");
-  el.classList.remove("empty"); el.innerHTML = events.join("");
-}
-
-function logGave(msg){
-  if (!msg) return;
-  const d = new Date();
-  const t = [d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
-  events.unshift(`<div class="gave"><time>${t}</time><span>${msg}</span></div>`);
-  events.length = Math.min(events.length, 16);
-  const el = document.getElementById("log");
-  el.classList.remove("empty"); el.innerHTML = events.join("");
-}
-
-function logPred(msg){
-  const d = new Date();
-  const t = [d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
-  events.unshift(`<div class="pred"><time>${t}</time><span>${msg}</span></div>`);
-  events.length = Math.min(events.length, 16);
-  const el = document.getElementById("log");
-  el.classList.remove("empty"); el.innerHTML = events.join("");
-}
-
-function logSlot(msg){
-  if (!msg) return;
-  const d = new Date();
-  const t = [d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
-  events.unshift(`<div class="slot"><time>${t}</time><span>${msg}</span></div>`);
-  events.length = Math.min(events.length, 16);
-  const el = document.getElementById("log");
-  el.classList.remove("empty"); el.innerHTML = events.join("");
-}
-
-function log(msg, crash){
-  if (!msg) return;
-  const d = new Date();
-  const t = [d.getHours(),d.getMinutes(),d.getSeconds()].map(n=>String(n).padStart(2,"0")).join(":");
-  events.unshift(`<div class="${crash?"crash":""}"><time>${t}</time><span>${msg}</span></div>`);
-  events.length = Math.min(events.length, 16);
-  const el = document.getElementById("log");
-  el.classList.remove("empty");
-  el.innerHTML = events.join("");
 }
 
 // messages a second, worked out from how fast the total is climbing
@@ -2067,7 +1681,7 @@ document.addEventListener("click", async (e) => {
   if (power){
     const out = await post("/api/power",
       {robot_id: power.dataset.power, alive: power.dataset.alive === "1"});
-    showHint(out.message); log(out.message);
+    showHint(out.message);
     return;
   }
 
@@ -2076,31 +1690,21 @@ document.addEventListener("click", async (e) => {
     const silenced = new Set((STATE && STATE.bus && STATE.bus.silenced) || []);
     const rid = mute.dataset.mute;
     const out = await post("/api/silence", {robot_id: rid, on: !silenced.has(rid)});
-    showHint(out.message); log(out.message);
-    return;
-  }
-
-  const card = e.target.closest("[data-rid]");
-  if (card){
-    selected = card.dataset.rid;
-    sendFocus();
-    const note = document.getElementById("selNote");
-    if (note) note.innerHTML =
-      `&mdash; clicks control <b style="color:${colorFor(selected)}">${selected}</b>`;
+    showHint(out.message);
     return;
   }
 
   const fleet = e.target.closest("[data-fleet]");
   if (fleet){
     const out = await post("/api/fleet", {action: fleet.dataset.fleet});
-    showHint(out.message); log(out.message);
+    showHint(out.message);
     return;
   }
 
   const human = e.target.closest("[data-human]");
   if (human){
     const out = await post("/api/human", {action: human.dataset.human});
-    showHint(out.message); log(out.message);
+    showHint(out.message);
   }
 });
 
