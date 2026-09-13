@@ -10,10 +10,9 @@ If it cannot book the square ahead, it stops before it and waits.
 
 Where the table lives
 ---------------------
-Not on a server. 02_TECHNICAL_ARCHITECTURE section 3: the backend "must not be
-the only component capable of preventing a robot collision." So EVERY robot
-keeps its own copy of this table, built from PATH_RESERVATION messages it hears
-on the radio.
+Not on a server. No single component may be the only thing capable of
+preventing a robot collision -- so EVERY robot keeps its own copy of this
+table, built from PATH_RESERVATION messages it hears on the radio.
 
 Two robots claiming at once
 ---------------------------
@@ -22,10 +21,8 @@ either hears the other. The fix is that nobody "decides" anything at write
 time. Every claim is simply recorded, and the OWNER is worked out fresh when
 asked, using a rule every robot applies identically:
 
-    higher priority wins; if tied, the lower robot ID wins
-
-04_DECENTRALIZED_FLEET_PROTOCOL section 7: "If scores are equal: lower robot_id
-wins. This makes the system deterministic."
+    higher priority wins; if tied, the lower robot ID wins. That tie-break
+    is what makes the system deterministic.
 
 Because ownership is computed from the whole set rather than decided as claims
 arrive, robots reach the same answer even if the messages reach them in a
@@ -68,7 +65,7 @@ def edge_key(a: Cell, b: Cell) -> ResourceKey:
 
     Sorted so that a->b and b->a are the SAME resource. That is what stops two
     robots booking opposite directions down the same aisle and driving into
-    each other -- the head-on case from 05_PATH_PLANNING section 5.
+    each other -- the head-on case.
     """
     p, q = (a.x, a.y), (b.x, b.y)
     if q < p:
@@ -78,7 +75,7 @@ def edge_key(a: Cell, b: Cell) -> ResourceKey:
 
 @dataclass
 class Reservation:
-    """One booking. Fields follow the data model in 02_TECHNICAL_ARCHITECTURE §5."""
+    """One booking."""
 
     robot_id: str
     resource: ResourceKey
@@ -260,10 +257,8 @@ def avoidance_cost(
 ):
     """A route-cost rule that steers around squares other robots have booked.
 
-    05_PATH_PLANNING section 3:
-
-        edge_cost = distance + congestion_penalty + blocked_penalty
-                  + reservation_penalty + energy_penalty
+    edge_cost = distance + congestion_penalty + blocked_penalty
+              + reservation_penalty + energy_penalty
 
     Booked squares are made EXPENSIVE, never forbidden. This is how a maps app
     handles traffic: a jammed road is not closed, it is just slow, so you get

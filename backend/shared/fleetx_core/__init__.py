@@ -3,24 +3,23 @@
 PURE LOGIC ONLY -- this package must never import a web library or a ROS 2
 library. It is shared, unchanged, by:
 
-  Part 1  grid_sim/   the browser simulator that runs on a laptop
+  Part 1  simulator/   the browser simulator that runs on a laptop
   Part 2  ros2_ws/    the ROS 2 agent that runs on Ubuntu / a real robot
 
 Keeping it clean is what stops the brain from being written twice.
 """
 
-from .astar import find_path, find_sipp_path, find_space_time_path, manhattan, uniform_cost
+from .astar import find_path, find_sipp_path, manhattan, uniform_cost
 from .bus import FleetBus, InMemoryBus
 from .conflicts import (DEFAULT_CLEARANCE, DEFAULT_HORIZON, Conflict, ConflictKind,
                         Plan, Window, build_plan, find_conflicts)
 from .deadlock import (STUCK_SECONDS, WaitForGraph, Waiting, choose_victim)
 from .fleet_view import DEFAULT_STALE_AFTER, FleetView, Neighbour
-from .messages import (BlockedAisle, CentralCommand, ConflictAlert, Heartbeat,
+from .messages import (BlockedAisle, ConflictAlert, Heartbeat,
                        IntentUpdate, MessageType, PathReservation, PoseUpdate,
                        TaskAnnounce, TaskBid, TaskClaim, WaitReport,
                        YieldRequest, from_dict)
 from .grid import Cell, CellKind, Grid, default_grid
-from .central import CentralPlanner
 from .humans import Human
 from .inventory import CATALOGUE, Inventory, Shelf
 from .slotting import Reslotter, SlotMove
@@ -39,10 +38,10 @@ from .world import (COLLISION_DISTANCE, GEOMETRY_SAFE_GAP, World, fleet_world,
                     phase1_world, phase2_world)
 
 __all__ = [
-    "Inventory", "Shelf", "CATALOGUE", "Human", "CentralCommand",
-    "CentralPlanner", "Reslotter", "SlotMove",
+    "Inventory", "Shelf", "CATALOGUE", "Human",
+    "Reslotter", "SlotMove",
     "Cell", "CellKind", "Grid", "default_grid",
-    "find_path", "find_sipp_path", "find_space_time_path", "manhattan", "uniform_cost",
+    "find_path", "find_sipp_path", "manhattan", "uniform_cost",
     "Robot", "RobotStatus",
     "FleetBus", "InMemoryBus",
     "FleetView", "Neighbour", "DEFAULT_STALE_AFTER",

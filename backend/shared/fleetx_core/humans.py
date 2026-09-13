@@ -1,7 +1,7 @@
 """PART 1 and PART 2 -- people working the same floor as the robots.
 
-19_HUMAN_ROBOT_COLLABORATION asks for exactly this: model where a person is
-and make robots react conservatively around them.
+People share the floor with the robots: this models where a person is
+and makes robots react conservatively around them.
 
 A Human is deliberately much simpler than a Robot. It has no radio, no job, no
 priority, no reservation table, no A* replanning of its own -- it just walks.

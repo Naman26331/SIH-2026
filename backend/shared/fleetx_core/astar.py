@@ -1,16 +1,21 @@
-"""A* -- the route finder. Same idea as a maps app.
+"""SIPP + A* -- the route finders. Same idea as a maps app.
 
 PURE LOGIC ONLY. No web code, no ROS 2 code.
 
-How it works, in one paragraph:
-  Start at the robot's square. Keep a list of squares worth exploring, always
-  picking the one that looks most promising. "Most promising" = steps already
-  walked + a guess of how many steps are still left. Shelves are simply never
-  added to the list. When the goal comes off the list, walk the trail of
-  "I came from here" markers backwards -- that trail is the route.
+Two planners, both executed independently by every robot on its OWN local
+knowledge (peer-to-peer reservations, never a global table):
 
-Why A* and not something cleverer: it is simple, it always finds the shortest
-route if one exists, and it is easy to explain to a judge (see 11_SIH_DEMO).
+  find_path      -- static spatial A* (no time). Used for map-only questions
+                    such as a wandering person or a charger lookup.
+  find_sipp_path -- THE fleet planner. Safe Interval Path Planning over the
+                    robot's local reservation copy. Contiguous free timesteps
+                    at a cell are one safe interval, so waits fall out of the
+                    search instead of being explicit time layers.
+
+Why SIPP and not space-time A*: same earliest-arrival routes, far fewer
+states, and the interval form matches the reservation table's
+``unavailable_intervals()`` directly. Pair with PIBT priority inheritance
+(see robot.py) for decentralized coordination.
 """
 
 import heapq
@@ -23,7 +28,7 @@ from .reservations import ReservationTable, edge_key, node_key, target_key
 # A cost function scores one step from square A to square B.
 # Phase 1 always returns 1.0 (every step costs the same).
 # Later phases will make busy or reserved aisles cost more, which is how a
-# robot ends up choosing a longer-but-faster route (see 05_PATH_PLANNING §3).
+# robot ends up choosing a longer-but-faster route.
 CostFn = Callable[[Cell, Cell], float]
 
 
@@ -103,30 +108,6 @@ def find_path(
     return None
 
 
-def find_space_time_path(
-    grid: Grid,
-    start: Cell,
-    goal: Cell,
-    *,
-    table: Optional[ReservationTable],
-    robot_id: str,
-    now: float,
-    speed: float,
-    cost_fn: Optional[CostFn] = None,
-    blocked: Optional[Set[Cell]] = None,
-    max_time_steps: int = 200,
-    max_expansions: int = 12_000,
-    clearance: float = 0.35,
-) -> Optional[List[Cell]]:
-    """Compatibility name for the SIPP planner used by older callers."""
-    return find_sipp_path(
-        grid, start, goal, table=table, robot_id=robot_id, now=now,
-        speed=speed, cost_fn=cost_fn, blocked=blocked,
-        max_time_steps=max_time_steps, max_expansions=max_expansions,
-        clearance=clearance,
-    )
-
-
 def find_sipp_path(
     grid: Grid,
     start: Cell,
@@ -144,9 +125,10 @@ def find_sipp_path(
 ) -> Optional[List[Cell]]:
     """Safe Interval Path Planning using only this robot's local knowledge.
 
-    Unlike space-time A*, contiguous free timesteps at a cell are represented
-    by one safe interval. Reservations remain peer-to-peer DDS facts; SIPP is
-    independently executed by every robot and has no global planner.
+    Decentralized-only: ``table`` is the robot's OWN reservation copy built
+    from peer-to-peer PATH_RESERVATION messages, never a shared/global
+    service. Each robot runs this independently; coordination emerges from
+    reservations + PIBT inheritance (see robot.py), not from a boss.
     """
     cost_fn = cost_fn or uniform_cost
     blocked = blocked or set()

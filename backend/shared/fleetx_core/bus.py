@@ -15,8 +15,8 @@ places:
   InMemoryBus          Ros2Bus  (ros2_ws/, written later)
   laptop, today        DDS topics on Ubuntu
 
-InMemoryBus deliberately drops and delays messages, because
-04_DECENTRALIZED_FLEET_PROTOCOL section 8 says:
+InMemoryBus deliberately drops and delays messages, because the protocol
+must never assume every message arrives:
 
     "The protocol must never assume every message arrives."
 
@@ -114,13 +114,11 @@ class InMemoryBus(FleetBus):
         self._inboxes.pop(robot_id, None)
 
     def publish(self, message: Any) -> None:
-        # Almost always the same thing: robot_id IS the sender. The two
-        # exceptions -- a robot releasing a PEER's job on its behalf (Phase
-        # 23), and the central boss addressing a named robot (Phase 18) --
-        # carry an explicit `sender` because robot_id means something else
-        # for them ("whose task this is", "who this is FOR"). Routing on the
-        # wrong one silently excluded the one robot a central command was
-        # actually addressed to from ever receiving it.
+        # Almost always the same thing: robot_id IS the sender. The one
+        # exception -- a robot releasing a PEER's job on its behalf (Phase
+        # 23) -- carries an explicit `sender` because robot_id means
+        # "whose task this is" there, not "who is speaking". Routing on the
+        # wrong one misdelivers the release.
         sender = getattr(message, "sender", None) or getattr(message, "robot_id", None)
         self.sent += 1
         self.recent.append(message)

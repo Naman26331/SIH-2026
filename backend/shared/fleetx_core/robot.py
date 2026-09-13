@@ -16,7 +16,6 @@ So the thinking is written once, and only the "how do the wheels turn" bit
 differs between simulation and a real robot.
 """
 
-import random
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, Iterable, List, Optional
@@ -30,7 +29,7 @@ from .humans import Human
 from . import security
 from .fleet_view import FleetView
 from .grid import Cell, CellKind, Grid
-from .messages import (BlockedAisle, CentralCommand, ConflictAlert, Heartbeat,
+from .messages import (BlockedAisle, ConflictAlert, Heartbeat,
                        IntentUpdate, PathReservation, PoseUpdate, TaskAnnounce,
                        TaskBid, TaskClaim, WaitReport, YieldRequest)
 from .obstacles import DEFAULT_TTL, BlockedMap
@@ -44,7 +43,7 @@ from .reservations import (DEFAULT_LOOKAHEAD, OCCUPANCY_PRIORITY, Reservation,
 
 
 class RobotStatus(str, Enum):
-    """The words the dashboard shows. Taken from 07_DASHBOARD §7."""
+    """The words the dashboard shows."""
 
     IDLE = "IDLE"                  # nothing to do, parked
     MOVING = "MOVING"              # driving along its route
@@ -85,7 +84,7 @@ class Robot:
     x: float = 0.0
     y: float = 0.0
 
-    # Running totals, used later for the benchmark in Phase 15.
+    # Running totals for run statistics.
     steps: int = 0
     distance: float = 0.0
     replans: int = 0
@@ -129,14 +128,6 @@ class Robot:
     _charge_checked_at: float = -99.0
     _charge_wanted: bool = False
 
-    # --- driven entirely by a central boss, not itself (Phase 18) ---
-    # True means: do not plan, do not bid, do not reroute. Follow the last
-    # route the boss actually sent, and nothing else -- exactly the
-    # architecture this mode exists to test the fragility of.
-    centrally_controlled: bool = False
-    _central_task_seen: Optional[str] = None   # last task_id actually RECEIVED
-    _central_path_seen: Optional[tuple] = None # last route actually ADOPTED
-
     # --- people on the floor (Phase 22) ---
     # human_id -> (x, y, sensed_at). Sensed locally, exactly like local_contacts
     # -- never from a message, because a safety system built around people
@@ -171,9 +162,6 @@ class Robot:
     _asked_at: Dict[str, float] = field(default_factory=dict)
     _make_way_for: Optional[tuple] = None
     _pending_ask: Optional[tuple] = None
-    _pending_negotiations: List[tuple] = field(default_factory=list)
-    _negotiations: Dict[str, dict] = field(default_factory=dict)
-    _saw_rng: object = None         # backoff randomness, seeded per robot
     _still_for: float = 0.0         # seconds spent going nowhere, see stalled_for
     _reversing: bool = False        # backing out of a segment it cannot finish
 
@@ -222,9 +210,6 @@ class Robot:
             self.blocked_map = BlockedMap()
         if self.board is None:
             self.board = TaskBoard()
-        if self._saw_rng is None:
-            # Seeded from the name so a benchmark run is repeatable.
-            self._saw_rng = random.Random(sum(ord(c) for c in self.robot_id))
 
     # ------------------------------------------------------------- commands
 
@@ -307,7 +292,7 @@ class Robot:
         )
 
     def decide(self, grid: Grid, cost_fn: Optional[Callable] = None,
-               now: float = 0.0, traffic_aware: bool = True) -> None:
+               now: float = 0.0) -> None:
         """Work out what to do next. BOTH the simulator and ROS 2 call this.
 
         It only changes the robot's plan and status. It never moves anything.
@@ -327,31 +312,6 @@ class Robot:
         if self.halted:
             self.status = (RobotStatus.WAITING if self.path or self.goal
                            else RobotStatus.IDLE)
-            return
-
-        # Phase 18. Driven by a central boss, not itself: it does not plan,
-        # does not replan around anything it notices, and does not ask for
-        # work. It runs the route it was last actually TOLD to run, and
-        # nothing more -- arrival detection is the one piece of "thinking"
-        # left, because recognising you have stopped moving is not
-        # intelligence, it is just noticing.
-        if self.centrally_controlled:
-            if self.goal is None:
-                self.status = RobotStatus.IDLE
-                return
-            if self.cell == self.goal and not self.path and self._progress == 0.0:
-                self.goal = None
-                self.status = RobotStatus.IDLE
-                self._progress = 0.0
-                return
-            if self.path:
-                if not self.hold:
-                    self.status = RobotStatus.MOVING
-            else:
-                # Has somewhere to be but nothing to drive there with yet --
-                # waiting on the boss, the same as a robot waiting on
-                # anything else.
-                self.status = RobotStatus.WAITING
             return
 
         # Nothing to do.
@@ -394,13 +354,12 @@ class Robot:
                 self.status = RobotStatus.MOVING
             return
 
-        # Need a route.
-        # Normal FLEET-X planning starts from this robot's OWN received
-        # reservations, intents and sensor contacts. No world/global traffic
-        # count is consulted. Baseline/central experiments explicitly disable
-        # this in World.tick() so their route choice remains unchanged.
+        # Need a route. Planning always starts from this robot's OWN
+        # received reservations, intents and sensor contacts. No
+        # world/global traffic count is consulted -- that is what keeps
+        # planning decentralized.
         route_cost = cost_fn
-        if route_cost is None and traffic_aware and self.table is not None:
+        if route_cost is None and self.table is not None:
             route_cost = avoidance_cost(
                 self.table, self.robot_id, now,
                 occupied=self.known_occupied(now),
@@ -466,8 +425,8 @@ class Robot:
 
         if self.hold and self.emergency:
             # EMERGENCY STOP. Something is in the space ahead, so stop dead --
-            # even part way down an aisle. 05_PATH_PLANNING section 12: "the
-            # safety controller takes precedence over fleet optimisation."
+            # even part way down an aisle. The safety controller takes
+            # precedence over fleet optimisation.
             #
             # Robots have brakes. Insisting on always finishing the segment
             # already begun is what let two robots, each committed a fraction of
@@ -575,9 +534,8 @@ class Robot:
         first = (1.0 - self._progress) / speed          # time to the next square
         return [first + i / speed for i in range(len(self.path))]
 
-    # In safe mode a robot runs at half speed. 03_ROBOT_AND_ROS2 section 9:
-    # "NETWORK OFF -> reduce speed -> use local obstacle avoidance". Less
-    # information about the world means more caution, not the same caution.
+    # In safe mode a robot runs at half speed: less information about the
+    # world means more caution, not the same caution.
     SAFE_MODE_SPEED_FACTOR = 0.5
 
     # --- Phase 22: never enter a person's space, always slow down near one ---
@@ -710,7 +668,6 @@ class Robot:
             self._ingest_jam_news(message, now)
             self._ingest_blocked_aisle(message, now)
             self._ingest_task_news(message, now)
-            self._ingest_central_command(message, now)
             self.messages_heard += 1
             # Anything at all arriving means the radio is alive.
             self.last_heard_any = now
@@ -761,7 +718,7 @@ class Robot:
             ))
         self._pending_blocks.clear()
 
-        # 4b. Any request we were asked to pass along.
+        # 4b. Any PIBT request we were asked to pass along (backtracking).
         if self._pending_ask is not None:
             who, side, root, trail, priority = self._pending_ask
             self._pending_ask = None
@@ -770,19 +727,6 @@ class Robot:
                 target=who, resource=(side.x, side.y), reason="PIBT",
                 priority=priority, root=root, trail=trail,
             ))
-
-        # Pairwise conflict handshake. The elected loser says YIELDING; the
-        # winner ACKs. Both keep the same short-lived lock, so a long wait can
-        # never make the winner independently reroute too.
-        for action, target, resource, conflict_id, winner in self._pending_negotiations:
-            self._publish(bus, YieldRequest(
-                robot_id=self.robot_id, timestamp=now, seq=self.seq,
-                target=target, resource=resource, reason="CONFLICT",
-                action=action, conflict_id=conflict_id, winner=winner,
-                priority=self.priority, root=self._pibt_root or self.robot_id,
-                trail=[self.robot_id],
-            ))
-        self._pending_negotiations.clear()
 
         # 5. "I am stuck behind X" -- the raw material for spotting a jam that
         #    will never clear itself. Sent when it changes, not constantly.
@@ -873,131 +817,6 @@ class Robot:
         for k in stale_keys:
             del self._announced[k]
 
-    # ------------------------------ the STOP-AND-WAIT baseline (Phase 15)
-
-    # How close another robot has to be before a stop-and-wait robot freezes.
-    SAW_STOP_RADIUS = 1.6
-    # How long two of them stand nose to nose before the lower name goes first.
-    # Without something like this they wait for each other for ever and the
-    # warehouse dies -- so a real stop-and-wait system would have it, and
-    # leaving it out would be rigging the comparison.
-    SAW_STANDOFF = 2.0
-
-    # Stuck this long and it backs off to a random free square nearby and tries
-    # again. Crude, but it is what a simple system does, and without it the
-    # baseline deadlocks permanently and never finishes the work at all -- so
-    # there would be no time to compare. Being generous to the baseline makes
-    # our own number SMALLER, which is the direction that survives scrutiny.
-    SAW_BACKOFF = 5.0
-
-    def stop_and_wait_check(self, now: float, dt: float) -> None:
-        """The dumb fleet's only traffic rule: if somebody is close, stop.
-
-        This is the thing FLEET-X is measured against. It has NO intent
-        sharing, NO booking, NO priority, NO negotiation and NO rerouting. A
-        robot sees another robot near, stops, and waits for it to clear.
-
-        Everything else -- the map, A*, the speed, the job auction -- is
-        identical to FLEET-X. The coordination logic is the only difference,
-        which is the whole point of the comparison.
-        """
-        self.blocked_by = None
-        if self.status is RobotStatus.FAILED:
-            self._set_hold(False, now, dt)
-            return
-
-        if not self.path:
-            # Phase 22. Parked does not mean safe: nothing about NOT having a
-            # route stops a person walking up to where we are standing. A
-            # person near a robot that never checks anything is exactly the
-            # gap that let one through in testing -- an idle robot with no
-            # path simply never looked. So look anyway, at our own square,
-            # even with nowhere to go.
-            person = self._human_too_close(self.cell, now)
-            self._set_hold(person is not None, now, dt, emergency=True)
-            if person is not None:
-                self.blocked_by = f"person:{person}"
-            return
-
-        nxt = self.path[0]
-
-        # Exactly the same safety reflex FLEET-X has. Not a coordination
-        # feature -- without it the baseline crashes, and a fleet that crashes
-        # cannot be compared with one that does not.
-        if self._local_safety_says_stop(nxt, now, dt):
-            return
-
-        nearest = None
-        for note in self.fleet.fresh(now):
-            for px, py in ((note.x, note.y), note.position_at(now)):
-                for tx, ty in ((nxt.x, nxt.y), (self.x, self.y)):
-                    if (px - tx) ** 2 + (py - ty) ** 2 < self.SAW_STOP_RADIUS ** 2:
-                        nearest = note
-                        break
-                if nearest:
-                    break
-            if nearest:
-                break
-
-        if nearest is None:
-            self._set_hold(False, now, dt, emergency=False)
-            return
-
-        # Nose to nose for a while: the lower name goes first, or neither ever
-        # moves again and the warehouse dies. This is the least clever
-        # tie-break there is, and a real stop-and-wait system would have
-        # something like it -- leaving it out would rig the comparison.
-        if (self.waited_for(now) > self.SAW_STANDOFF
-                and nearest.velocity <= 0.01
-                and self.robot_id < nearest.robot_id):
-            self._set_hold(False, now, dt, emergency=False)
-            return
-
-        self.blocked_by = nearest.robot_id
-        self._set_hold(True, now, dt, emergency=True)
-
-    def stop_and_wait_backoff(self, grid: Grid, now: float) -> Optional[str]:
-        """Stuck a long time: shuffle somewhere random and try again.
-
-        Note what this is NOT. There is no intent sharing, no booking, no
-        priority, no negotiation and no wait-for graph. The robot does not know
-        why it is stuck or who it is stuck behind. It just gives up and moves,
-        the way a simple system would.
-        """
-        if not self.hold or self.goal is None:
-            return None
-        if self.waited_for(now) < self.SAW_BACKOFF:
-            return None
-        if now < self._reroute_cooldown_until:
-            return None
-        self._reroute_cooldown_until = now + self.SAW_BACKOFF
-
-        taken = {Cell(n.cell[0], n.cell[1]) for n in self.fleet.fresh(now)}
-        options = [c for c in grid.neighbours(self.cell) if c not in taken]
-        if not options:
-            return None
-
-        # Retreat AWAY from whoever is in the way, not just anywhere -- and
-        # then sit still for a random moment so they have time to get past.
-        # Backing off and immediately walking back into the same robot is a
-        # weaker baseline than a real system would be, and a weak baseline
-        # would make our own result look better than it is.
-        blocker = self.fleet.get(self.blocked_by) if self.blocked_by else None
-        if blocker is not None:
-            options.sort(key=lambda c: -((c.x - blocker.x) ** 2 + (c.y - blocker.y) ** 2))
-            spot = options[0]
-        else:
-            spot = options[self._saw_rng.randrange(len(options))]
-
-        if self._suspended_goal is None:
-            self._suspended_goal = self.goal
-        self.set_goal(spot)
-        self.status = RobotStatus.REROUTING
-        self._reroute_at = now
-        self._resume_at = now + 1.0 + self._saw_rng.random() * 3.0
-        self.reroutes += 1
-        return f"{self.robot_id} backed off to ({spot.x}, {spot.y}) - stuck too long"
-
     # --------------------------------------- booking squares (Phase 5)
 
     # --- Phase 13: charge ---
@@ -1085,7 +904,7 @@ class Robot:
             leave = now + (etas[i + 1] if i + 1 < len(etas) else etas[i] + dwell) + self.CLEARANCE
             prev = chain[i]
             if node == prev:
-                # A space-time WAIT occupies the same square for another time
+                # A SIPP WAIT occupies the same square for another time
                 # step. Keep one continuous physical-occupancy claim; there is
                 # no traversed edge to reserve.
                 key = node_key(node)
@@ -1133,8 +952,8 @@ class Robot:
         if self.status is RobotStatus.FAILED:
             # A broken robot must not keep squares booked, or the rest of the
             # fleet drives around holes that nobody is in. release_all() hands
-            # its charging bay back too.
-            # 03_ROBOT_AND_ROS2 section 5: release its future reservations.
+            # its charging bay back too. A peer releasing on its behalf also
+            # releases its future reservations.
             self.release_all(bus, now)
             return
 
@@ -1193,8 +1012,6 @@ class Robot:
         self._asked_at.clear()
         self._make_way_for = None
         self._pending_ask = None
-        self._pending_negotiations.clear()
-        self._negotiations.clear()
         self._contact_since.clear()
         self.local_contacts = []
         self.safe_mode = False
@@ -1226,8 +1043,6 @@ class Robot:
         self._charge_slot = None
         self._charge_wanted = False
         self._charge_checked_at = -99.0
-        self._pending_negotiations.clear()
-        self._negotiations.clear()
 
     def _broadcast_reservation(self, bus, now: float, action: str, res: Reservation) -> None:
         if bus is None:
@@ -1262,10 +1077,9 @@ class Robot:
             return
 
         if not self.path:
-            # Phase 22. Same reasoning as stop_and_wait_check(): an idle
-            # robot with no route never used to check anything at all, so a
-            # person could walk right up to a parked robot with nothing
-            # noticing until the very last instant, if at all.
+            # Phase 22. Parked does not mean safe: nothing about NOT having a
+            # route stops a person walking up to where we are standing. So an
+            # idle robot still checks its own square every tick.
             person = self._human_too_close(self.cell, now)
             self._set_hold(person is not None, now, dt, emergency=True)
             if person is not None:
@@ -1311,16 +1125,13 @@ class Robot:
     def _local_safety_says_stop(self, nxt: Cell, now: float, dt: float) -> bool:
         """The reflex that stops a robot driving into an occupied space.
 
-        BOTH fleets have this, identically. 03_ROBOT_AND_ROS2 §8: "The local
-        safety layer must have authority to stop/slow the robot" and "should
-        not wait for the dashboard" -- on real hardware it is the LiDAR, which
-        needs no messages at all. Taking it away from the baseline would not
-        make the baseline dumber, it would make it crash, and a fleet that
-        crashes is not a comparison.
+        The local safety layer must have authority to stop/slow the robot
+        and must not wait for the dashboard -- on real hardware it is the
+        LiDAR, which needs no messages at all.
 
-        What FLEET-X adds ON TOP of this -- intent sharing, booking,
-        negotiation, rerouting, deadlock breaking -- is what the benchmark
-        actually measures.
+        What the fleet adds ON TOP of this -- intent sharing, SIPP booking,
+        PIBT negotiation, rerouting, deadlock breaking -- is the coordination
+        layer. This reflex sits underneath all of it.
 
         Checking POSITION rather than which square somebody is registered on
         matters. Deciding takes an instant but driving takes time, so two
@@ -1492,7 +1303,7 @@ class Robot:
     def geometry_brake(self, now: float, dt: float, other_id: str) -> None:
         """Forced to a hard stop by World._enforce_geometry_gap (Phase 19) --
         physically too close to another robot's ACTUAL position, regardless
-        of what square booking, negotiation, or a central command decided.
+        of what square booking or PIBT negotiation decided.
 
         The same kind of hard, unnegotiated stop _human_too_close() already
         uses: no priority, no reasoning about who goes first, just "too
@@ -1575,9 +1386,8 @@ class Robot:
     def consider_reroute(self, grid: Grid, now: float, bus=None) -> bool:
         """Held up: wait it out, or take the long way round?
 
-        04_DECENTRALIZED_FLEET_PROTOCOL section 5:
-            compare priorities -> can we reserve? -> NO -> negotiate
-            -> wait OR reroute -> broadcast decision
+        The order of operations: compare priorities -> can we reserve?
+        -> NO -> negotiate -> wait OR reroute -> broadcast decision.
 
         Patience first. Most hold-ups clear on their own, and a robot that
         recalculated its route 20 times a second would just flap about.
@@ -1693,25 +1503,6 @@ class Robot:
         # reserve_ahead claims the new route before it moves.
         self.waiting_since = None
         return True
-
-    def _conflict_id(self, peer: str) -> str:
-        """Stable pair id, even if each robot names a different next square."""
-        first, second = sorted((self.robot_id, peer))
-        return f"{first}:{second}"
-
-    def _send_negotiation(self, bus, now: float, action: str, target: str,
-                          resource: Cell, conflict_id: str, winner: str) -> None:
-        payload = (action, target, (resource.x, resource.y), conflict_id, winner)
-        if bus is None:
-            self._pending_negotiations.append(payload)
-            return
-        self._publish(bus, YieldRequest(
-            robot_id=self.robot_id, timestamp=now, seq=self.seq,
-            target=target, resource=(resource.x, resource.y), reason="CONFLICT",
-            action=action, conflict_id=conflict_id, winner=winner,
-            priority=self.priority, root=self._pibt_root or self.robot_id,
-            trail=[self.robot_id],
-        ))
 
     # ----------------------------- getting out of the way when idle
 
@@ -2004,55 +1795,6 @@ class Robot:
                 if task.assigned_robot == message.robot_id:
                     task.release()
 
-    def _ingest_central_command(self, message, now: float) -> None:
-        """Phase 18. The ONE message a centrally-planned robot acts on: "do
-        this job, drive exactly this route." Not for us, ignored -- the boss
-        addresses every robot on the floor, same as any broadcast.
-
-        Building a fresh local Task from the message, rather than reaching
-        into a shared object somewhere, is deliberate: it is the SAME thing
-        _ingest_task_news() already does for TaskAnnounce, and it means a
-        centrally-controlled robot knows only what it has actually been
-        told, exactly like every other robot in this project.
-
-        The boss RESENDS a command it has not seen confirmed, the same way
-        _reannounce_forgotten_tasks() already does for orders -- the network
-        it travels over can lose a message just as easily as any other. A
-        resend carries the identical path as before, and adopting it again
-        would reset _progress to 0 while the robot is honestly part way
-        across a square, snapping it backwards onto the square behind it --
-        exactly the teleport this project has broken on before. So the new
-        path is only ever adopted when it is actually DIFFERENT from the one
-        already being driven, never merely because a message arrived.
-        """
-        if not isinstance(message, CentralCommand):
-            return
-        if message.robot_id != self.robot_id:
-            return
-
-        route = tuple(message.path)
-        if route == self._central_path_seen:
-            return                      # a resend of what we are already doing
-
-        if message.task_id and message.task_id != self._central_task_seen:
-            self._central_task_seen = message.task_id
-            task = Task(
-                task_id=message.task_id,
-                pickup=Cell(*message.pickup), dropoff=Cell(*message.dropoff),
-                product=message.product, priority=5,
-                created_at=now, announced_at=now,
-                assigned_robot=self.robot_id, status=TaskStatus.ASSIGNED,
-            )
-            self.board.add(task)
-            self.staging = None
-            self.staging_why = ""
-            self.task = task
-
-        self._central_path_seen = route
-        self.path = [Cell(x, y) for x, y in message.path]
-        self.goal = self.path[-1] if self.path else None
-        self._progress = 0.0
-
     def work_on_tasks(self, grid: Grid, bus, now: float) -> List[str]:
         """Bid for jobs, claim what we win, and get on with it."""
         notes = self._task_notes
@@ -2075,20 +1817,9 @@ class Robot:
         if self.charger is not None or self.status is RobotStatus.CHARGING:
             return notes
 
-        # Phase 18. Driven by a central boss: it does not bid (there is no
-        # auction to bid into -- the boss decides, alone, with everything it
-        # can see), and it does not reassign a quiet peer's job (it has no
-        # peer relationship with anyone to notice that with). It only ever
-        # does the one thing any robot does once it is actually carrying
-        # something: finish the trip.
-        if self.centrally_controlled:
-            if self.task is not None:
-                notes += self._progress_task(grid, bus, now)
-            return notes
-
         # A peer has gone quiet while holding a job. Put it back up for
-        # auction -- 06_TASK_ALLOCATION section 4. Whoever notices first does
-        # it; a repeat is harmless because the job keeps its id.
+        # auction. Whoever notices first does it; a repeat is harmless
+        # because the job keeps its id.
         #
         # BUT only while our own radio is clearly working. If we cannot hear
         # ANYBODY, the one that has gone quiet is probably us, and "everyone
@@ -2175,7 +1906,7 @@ class Robot:
         if self.task is not None:
             return notes
 
-        # A newly idle robot used to run two space-time A* searches for every
+        # A newly idle robot used to run two SIPP searches for every
         # queued order in this single tick. With a backlog, each job completion
         # froze the simulation and therefore the browser. Spread new bid work
         # across ticks; existing bids remain cached.
@@ -2490,7 +2221,6 @@ class Robot:
     def update_link_health(self, now: float) -> Optional[str]:
         """Decide whether we are on our own, and say so when it changes.
 
-        01_PRODUCT_AND_SYSTEM_DESIGN section 7:
             Normal network      -> decentralised coordination
             Network degraded    -> local coordination / reduced speed
             Network unavailable -> local safety mode
@@ -2518,8 +2248,7 @@ class Robot:
     def _resync(self, bus, now: float) -> None:
         """Tell everyone everything again, after being out of touch.
 
-        03_ROBOT_AND_ROS2 section 9: SYNC STATE, SYNC TASK, SYNC RESERVATIONS,
-        RESUME. Nothing clever -- the periodic broadcasts are simply forced to
+        Nothing clever -- the periodic broadcasts are simply forced to
         go out at once instead of waiting for their next turn.
         """
         self._resync_pending = False
@@ -2620,70 +2349,26 @@ class Robot:
                 self.waits._blocked_by.pop(message.robot_id, None)
 
         elif isinstance(message, YieldRequest) and message.target == self.robot_id:
-            if message.action == "REQUEST":
-                root = message.root or message.robot_id
-                trail = list(message.trail) or [message.robot_id]
-                # Seeing ourselves means request chain looped. Refusing that
-                # edge is distributed PIBT backtracking, not central recovery.
-                if self.robot_id not in trail:
-                    inherited = max(message.priority, self.priority)
-                    self._pibt_priority = max(self._pibt_priority, inherited)
-                    self._pibt_until = max(
-                        self._pibt_until, now + self.NEGOTIATION_LOCK)
-                    self._pibt_root = root
-                    self._make_way_for = (
-                        message.robot_id, Cell(*message.resource), now,
-                        root, trail + [self.robot_id], inherited,
-                    )
-            else:
-                self._ingest_negotiation(message, now)
-
-    def _ingest_negotiation(self, message: YieldRequest, now: float) -> None:
-        """Apply one authenticated pairwise conflict handshake message."""
-        if message.action not in ("PROPOSE", "YIELDING", "ACK"):
-            return
-        if not message.conflict_id or not message.winner:
-            return
-
-        peer = message.robot_id
-        state = self._negotiations.setdefault(message.conflict_id, {
-            "peer": peer, "winner": message.winner, "expires": 0.0,
-            "last_sent": -99.0, "state": "NEW",
-        })
-
-        # Priority snapshots can briefly disagree. If both claim to be winner,
-        # the stable robot id breaks the disagreement identically at both ends.
-        if state["winner"] != message.winner:
-            elected = min(str(state["winner"]), message.winner)
-            state["winner"] = elected
-            if elected != message.winner:
+            # PIBT-only: every coordination message is a priority-inheritance
+            # REQUEST carrying (priority, root, trail). Legacy PROPOSE /
+            # YIELDING / ACK handshake packets from older peers are ignored;
+            # the REQUEST chain plus local backtracking replaces them.
+            if message.action != "REQUEST":
                 return
-        state.update({
-            "peer": peer, "winner": message.winner,
-            "expires": now + self.NEGOTIATION_LOCK,
-            "state": message.action,
-        })
-        if message.action == "PROPOSE" and message.winner == peer:
-            # We are the designated loser. Confirm it; only we may replan.
-            self._pibt_priority = max(self._pibt_priority, message.priority)
-            self._pibt_until = max(
-                self._pibt_until, now + self.NEGOTIATION_LOCK)
-            self._pibt_root = message.root or peer
-            self.status = RobotStatus.YIELDING
-            self._pending_negotiations.append((
-                "YIELDING", peer, message.resource,
-                message.conflict_id, message.winner,
-            ))
-        elif message.action == "YIELDING" and message.winner == self.robot_id:
-            # The loser accepted. ACK without overriding physical safety: the
-            # normal clearance check starts us once the square is truly clear.
-            self._pending_negotiations.append((
-                "ACK", peer, message.resource,
-                message.conflict_id, message.winner,
-            ))
-            self.last_decision = f"{self.robot_id} ACKed {peer} yielding"
-        elif message.action == "ACK" and message.winner == peer:
-            self.status = RobotStatus.YIELDING
+            root = message.root or message.robot_id
+            trail = list(message.trail) or [message.robot_id]
+            # Seeing ourselves means request chain looped. Refusing that
+            # edge is distributed PIBT backtracking, not central recovery.
+            if self.robot_id not in trail:
+                inherited = max(message.priority, self.priority)
+                self._pibt_priority = max(self._pibt_priority, inherited)
+                self._pibt_until = max(
+                    self._pibt_until, now + self.NEGOTIATION_LOCK)
+                self._pibt_root = root
+                self._make_way_for = (
+                    message.robot_id, Cell(*message.resource), now,
+                    root, trail + [self.robot_id], inherited,
+                )
 
     def report_jam(self, grid: Grid, bus, now: float) -> Optional[str]:
         """Have I been stuck so long that this will never clear itself?

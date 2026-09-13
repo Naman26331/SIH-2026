@@ -2,11 +2,12 @@
 
 PURE LOGIC ONLY. No web code, no ROS 2 code.
 
-04_DECENTRALIZED_FLEET_PROTOCOL section 6:
+The priority score combines task priority, urgency, waiting time and a
+battery factor:
 
     priority_score = task_priority + urgency + waiting_time + battery_factor
 
-05_PATH_PLANNING section 9, the fairness rule:
+The fairness rule:
 
     effective_priority = base_priority + waiting_seconds * aging_factor
 
@@ -18,7 +19,7 @@ more you are owed, so everyone eventually gets their turn.
 
 Whole numbers on the wire
 -------------------------
-03_ROBOT_AND_ROS2 section 2 declares priority as int32, so scores are kept in
+The ROS 2 message declares priority as int32, so scores are kept in
 TENTHS of a point: 5.0 becomes 50. That keeps the ROS 2 message an integer
 while still letting priorities separate finely.
 """

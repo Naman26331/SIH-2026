@@ -266,8 +266,7 @@ class Simulation:
         """Cut or restore a robot's transmitter.
 
         The robot keeps driving. It just stops talking, so the others slowly
-        realise they have not heard from it. Tests the heartbeat timeout from
-        03_ROBOT_AND_ROS2 section 5.
+        realise they have not heard from it. Tests the heartbeat timeout.
         """
         with self.lock:
             if self.world.get(robot_id) is None:
@@ -285,8 +284,8 @@ class Simulation:
             return self.world.drain_batteries()
 
     def attack(self) -> dict:
-        """Phase 23's own demo: try to inject a forged message and watch the
-        fleet reject it -- no signature, so nothing else about it matters."""
+        """The forged-message demo: try to inject a fake message and watch
+        the fleet reject it -- no signature, so nothing else about it matters."""
         with self.lock:
             return self.world.simulate_fake_message()
 
@@ -343,7 +342,7 @@ class Simulation:
                     "message": f"Network: {pct}% of messages lost, {round(latency_ms)}ms delay."}
 
     def robot_power(self, robot_id: str, alive: bool) -> dict:
-        """Switch a robot off mid-job, or bring it back. 08_SIMULATION Sc. 6."""
+        """Switch a robot off mid-job, or bring it back. Failure drill."""
         with self.lock:
             if alive:
                 return self.world.revive_robot(robot_id)

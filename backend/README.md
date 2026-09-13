@@ -13,7 +13,7 @@ shared/fleetx_core/  pure Python planning and coordination brain
 simulator/           temporary grid simulation engine and API
 ros2_ws/             ROS 2 nodes, messages, robot and simulator integration
 tests/               automated behaviour and safety tests
-tools/               benchmarks and validation utilities
+tools/               validation utilities
 ```
 
 Run tests from repository root:

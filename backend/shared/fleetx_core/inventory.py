@@ -1,6 +1,6 @@
 """PART 1 and PART 2 -- what is actually on the shelves.
 
-06_TASK_ALLOCATION section 2 asks for orders a human can read. Up to now an
+Orders must read the way a human reads them. Up to now an
 order said "collect from (7, 5)", which is a coordinate, not a job. A picker in
 a real warehouse is told "Mouse x2 from shelf A14" and the number on the rack
 is how they find it.

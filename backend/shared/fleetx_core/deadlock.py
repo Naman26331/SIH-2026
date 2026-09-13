@@ -4,7 +4,7 @@ PURE LOGIC ONLY. No web code, no ROS 2 code.
 
 Two kinds of jam
 ----------------
-1. A CIRCULAR WAIT. 05_PATH_PLANNING section 8 draws it:
+1. A CIRCULAR WAIT. The shape of it:
 
        R1 -> R2 -> R3 -> R1
 

@@ -1,8 +1,7 @@
 """PART 1 and PART 2 -- learning which parts of the warehouse get busy.
 
-06_TASK_ALLOCATION section 6 asks for demand prediction. The useful version of
-that is not a neural network: it is noticing that aisle C has had most of the
-recent orders and that the far corner has had none, and standing somewhere
+The fleet predicts demand. The useful version of that is not a neural
+network: it is noticing that aisle C has had most of the recent orders and that the far corner has had none, and standing somewhere
 sensible before the next order arrives.
 
 So this counts. It keeps, for each aisle and each slot of the hour, how many

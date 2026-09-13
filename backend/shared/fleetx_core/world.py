@@ -2,8 +2,8 @@
 
 PURE LOGIC ONLY. No web code, no ROS 2 code.
 
-This is the thing the dashboard watches and the benchmark measures. In Part 2
-the ROS 2 gateway will build the same object from live robot messages, so the
+This is the thing the dashboard watches. In Part 2
+the ROS 2 gateway builds the same object from live robot messages, so the
 dashboard code does not change at all.
 """
 
@@ -21,7 +21,6 @@ from .tasks import Task, TaskBoard, TaskStatus
 from .reservations import Reservation
 from .grid import Cell, CellKind, Grid, default_grid
 from . import security
-from .central import CentralPlanner
 from .humans import Human
 from .inventory import Inventory
 from .slotting import Reslotter
@@ -55,10 +54,7 @@ _MAX_EVENTS = 40
 class World:
     """Everything happening on the warehouse floor right now."""
 
-    def __init__(self, grid: Optional[Grid] = None, bus: Optional[FleetBus] = None,
-                 reservations_enabled: bool = True,
-                 negotiation_enabled: bool = True,
-                 coordination: str = "FLEETX"):
+    def __init__(self, grid: Optional[Grid] = None, bus: Optional[FleetBus] = None):
         self.grid: Grid = grid if grid is not None else default_grid()
         # The group chat the robots talk over. Swap this for a ROS 2 bus and
         # the robots do not notice the difference.
@@ -79,36 +75,21 @@ class World:
         self.inventory: Inventory = Inventory(self.grid)
         # Phase 21: which products actually sell, and moving the best ones
         # closer to packing. A warehouse-operations decision, not a robot
-        # one -- it runs the same regardless of which coordination mode is
-        # driving the fleet, the same way Inventory itself already does.
+        # one -- it runs the same for the whole fleet, the same way
+        # Inventory itself already does.
         self.reslotter = Reslotter()
         # Off by default -- deliberately. It is not just the swap itself:
         # once on, an order for a product also resolves to the CLOSEST shelf
         # currently holding it (see OrderGenerator.tick() in scenarios.py),
         # not necessarily the exact shelf a scenario's own zone pattern
         # picked first. That changes which square orders actually collect
-        # from, which every existing benchmark and test was written against
-        # -- so, the same way Phase 18's coordination="CENTRAL" is opt-in,
-        # this stays opt-in too. The live dashboard turns it on; the official
-        # benchmarks and the rest of the test suite never touch this flag,
-        # so they see exactly the behaviour they always have.
+        # from. The live dashboard turns it on; headless runs leave it off.
         self.reslotting_enabled: bool = False
-        # Turn booking off to get the old, blind behaviour back. Phase 15 uses
-        # this to run the "before" side of the benchmark on the same code.
-        self.reservations_enabled: bool = reservations_enabled
-        # Turn negotiation off to get Phase 5 behaviour back: the loser of a
-        # booking just waits, instead of going around.
-        self.negotiation_enabled: bool = negotiation_enabled
-
-        # "FLEETX"        -- intent, booking, negotiation, deadlock breaking
-        # "STOP_AND_WAIT" -- the baseline: see a robot, stop. Nothing else.
-        # Everything OUTSIDE this setting is identical between the two.
-        self.coordination: str = coordination
         self.sim_time: float = 0.0     # seconds since the run started
         self.ticks: int = 0
         self.started_at: float = time.time()
 
-        # The number that has to reach zero. See 00_README "Success metrics".
+        # The number that has to stay at zero: collisions.
         self.collisions: int = 0
         self.tasks_completed: int = 0
         self.collision_events: List[Dict[str, object]] = []
@@ -135,26 +116,7 @@ class World:
         self.decisions: List[Dict[str, object]] = []
 
         # --- Phase 7: breaking jams that will never clear themselves ---
-        self.deadlock_enabled: bool = True
         self.deadlocks_broken: int = 0
-        if self.coordination == "STOP_AND_WAIT":
-            # The baseline has none of the clever parts. Only the traffic rule
-            # differs -- the map, A*, the speed and the job auction are shared.
-            self.reservations_enabled = False
-            self.negotiation_enabled = False
-            self.deadlock_enabled = False
-
-        # "CENTRAL" -- Phase 18. One boss plans every route and every
-        # assignment; robots do none of it themselves, only the same local
-        # safety reflex the baseline has. See central.py for why this is the
-        # experiment that tests whether decentralising was necessary, not
-        # just faster.
-        self.central: Optional[CentralPlanner] = None
-        if self.coordination == "CENTRAL":
-            self.reservations_enabled = False
-            self.negotiation_enabled = False
-            self.deadlock_enabled = False
-            self.central = CentralPlanner(self.bus)
 
         # --- Phase 8: things that should not be there ---
         # The TRUTH about what is on the floor. Robots cannot read this. They
@@ -206,7 +168,6 @@ class World:
             raise ValueError(
                 f"Robot {robot.robot_id} cannot start on {robot.cell}, that square is blocked."
             )
-        robot.centrally_controlled = (self.coordination == "CENTRAL")
         self.robots[robot.robot_id] = robot
         self.bus.register(robot.robot_id)
         return robot
@@ -276,14 +237,7 @@ class World:
 
         # Phase 13: charge. Before jobs on purpose -- a robot that is about to
         # run out should hand its work back BEFORE the auction runs, not after.
-        # Not for a centrally-controlled robot: going to charge means setting
-        # its OWN goal, which the boss has no way to know about and would
-        # simply overwrite on its next resend -- an interaction this phase
-        # does not model, so central mode leaves battery out of the picture
-        # entirely rather than get it subtly wrong.
         for robot in self.robots.values():
-            if robot.centrally_controlled:
-                continue
             note = robot.manage_battery(self.grid, self.bus, self.sim_time)
             if note:
                 self.decisions.append({
@@ -294,16 +248,7 @@ class World:
 
         # Phase 9: bid for jobs, claim what we win, get on with them.
         # Phase 9b: an idle robot must not sit on a pick or drop station.
-        # Not for a centrally-controlled robot: this sets a new goal directly,
-        # the same problem manage_battery() and pre-positioning already had --
-        # decide()'s central branch never plans a route to a goal the boss did
-        # not send, so the robot would simply stand there forever, "WAITING"
-        # for a command that will never come. Found by testing exactly this:
-        # a robot delivered, parked on the empty drop bay, tried to clear it,
-        # and never moved again.
         for robot in self.robots.values():
-            if robot.centrally_controlled:
-                continue
             note = robot.vacate_station(self.grid, self.sim_time)
             if note:
                 self.decisions.append({
@@ -319,18 +264,10 @@ class World:
                     "robot_id": robot.robot_id, "text": note,
                 })
                 del self.decisions[:-20]
-        # Phase 18. Not for central mode: this pulls world.board INTO STEP
-        # WITH THE ROBOTS' OWN COPIES, which is right for FLEET-X, where the
-        # robots are the ones who actually negotiate the outcome and the
-        # world is only watching. Under a central boss, world.board IS the
-        # authoritative record -- the boss writes to it directly, and
-        # updates it from CONFIRMED messages in central.tick() -- while a
-        # centrally-controlled robot's own board is built purely from
-        # TaskAnnounce and never learns who won an auction that never
-        # happened. Syncing FROM that stale, permanently-ANNOUNCED copy
-        # overwrote the boss's own assignment the very next tick.
-        if self.central is None:
-            self._sync_board()
+        # The robots negotiate the outcome between themselves; the world board
+        # is only watching, so pull it into step with their copies here.
+        # The dashboard reads this copy.
+        self._sync_board()
         # Finished work is terminal. Keep a short recent window for display,
         # then reduce it to counters/tombstones on every local board.
         self.board.archive_finished()
@@ -351,20 +288,10 @@ class World:
             })
             del self.decisions[:-20]
 
-        # Phase 18: the one boss, working out who does what and how to get
-        # there, for every robot that takes no such decisions of its own.
-        if self.central is not None:
-            self.central.tick(self, self.sim_time)
-
         # Phase 12: anybody still with nothing to do goes and waits where the
         # next order is likely to be. AFTER the auction on purpose -- a real job
         # always beats a guess, and this only ever sees robots that got none.
-        # Never for a centrally-controlled robot -- guessing where to wait is
-        # exactly the kind of decision this mode does not get to make for
-        # itself.
         for robot in (self.robots.values() if self.prepositioning else ()):
-            if robot.centrally_controlled:
-                continue
             note = robot.consider_prepositioning(self.grid, self.sim_time,
                                                  self.inventory)
             if note:
@@ -375,11 +302,7 @@ class World:
                 del self.decisions[:-20]
 
         for robot in self.robots.values():
-            robot.decide(
-                self.grid, cost_fn, self.sim_time,
-                traffic_aware=(self.coordination == "FLEETX"
-                               and self.reservations_enabled),
-            )
+            robot.decide(self.grid, cost_fn, self.sim_time)
 
         # Phase 4: every robot looks at its own plan against everyone else's.
         # It only LOOKS. Phase 5 books the square, Phase 6 decides who yields.
@@ -389,128 +312,64 @@ class World:
         self._record_warnings()
         self._expire_warnings()
 
+        # Decentralized coordination, every tick: SIPP reservations (Phase 5),
+        # PIBT priority passing and rerouting (Phase 6), and deadlock
+        # breaking (Phase 7). Each robot acts on its OWN local knowledge;
+        # there is no boss and no baseline branch -- this is the only path.
+        #
         # Phase 5: book the squares ahead, then check we are allowed onto the
         # next one. A robot that is not the owner stops before it.
-        if self.coordination == "STOP_AND_WAIT":
-            for robot in self.robots.values():
-                robot.stop_and_wait_check(self.sim_time, dt)
-            for robot in self.robots.values():
-                note = robot.back_out_if_wedged(self.sim_time)
-                if note:
-                    self.decisions.append({
-                        "sim_time": round(self.sim_time, 2),
-                        "robot_id": robot.robot_id, "text": note,
-                    })
-                    del self.decisions[:-20]
-            for robot in self.robots.values():
+        # Phase 6: standing is recomputed first -- the longer a robot has
+        # been stuck, the more it is owed.
+        for robot in self.robots.values():
+            robot.update_priority(self.sim_time, dt)
+        for robot in self.robots.values():
+            robot.reserve_ahead(self.bus, self.sim_time)
+        for robot in self.robots.values():
+            robot.check_clearance(self.sim_time, dt)
+        for robot in self.robots.values():
+            note = robot.back_out_if_wedged(self.sim_time)
+            if note:
+                self.decisions.append({
+                    "sim_time": round(self.sim_time, 2),
+                    "robot_id": robot.robot_id, "text": note,
+                })
+                del self.decisions[:-20]
+        # Phase 6: anyone held up decides whether to wait or go around.
+        for robot in self.robots.values():
+            if robot.consider_reroute(self.grid, self.sim_time, self.bus):
+                self.reroutes += 1
+                self.decisions.append({
+                    "sim_time": round(self.sim_time, 2),
+                    "robot_id": robot.robot_id,
+                    "text": robot.last_decision,
+                })
+                del self.decisions[:-20]
+        # Phase 7: anyone stuck far too long works out WHY, and either
+        # asks the robot in front to move or gets out of the way itself.
+        for robot in self.robots.values():
+            note = robot.answer_requests(self.grid, self.sim_time)
+            if note is None:
                 note = robot.resume_after_yielding(self.sim_time)
-                if note is None:
-                    note = robot.stop_and_wait_backoff(self.grid, self.sim_time)
-                if note:
-                    self.decisions.append({
-                        "sim_time": round(self.sim_time, 2),
-                        "robot_id": robot.robot_id, "text": note,
-                    })
-                    del self.decisions[:-20]
-            self._watch_for_jams()
-            # Phase 19: the finer backstop, UNDER the reflex above -- ground
-            # truth, not a message, so it holds even with the radio dead.
-            self._enforce_geometry_gap(self.sim_time, dt)
-        elif self.coordination == "CENTRAL":
-            # Phase 18. The identical safety layer the baseline has --
-            # nothing negotiated, nothing booked by the robot itself, just
-            # the local reflex any real AMR has regardless of architecture.
-            # Reused verbatim, on purpose: a rival architecture that had a
-            # WEAKER safety layer than the baseline would not be a fair
-            # rival, it would be a strawman.
-            for robot in self.robots.values():
-                robot.stop_and_wait_check(self.sim_time, dt)
-            for robot in self.robots.values():
-                note = robot.back_out_if_wedged(self.sim_time)
-                if note:
-                    self.decisions.append({
-                        "sim_time": round(self.sim_time, 2),
-                        "robot_id": robot.robot_id, "text": note,
-                    })
-                    del self.decisions[:-20]
-            for robot in self.robots.values():
-                note = robot.stop_and_wait_backoff(self.grid, self.sim_time)
-                if note:
-                    self.decisions.append({
-                        "sim_time": round(self.sim_time, 2),
-                        "robot_id": robot.robot_id, "text": note,
-                    })
-                    del self.decisions[:-20]
-            self._watch_for_jams()
-            # Phase 19: the finer backstop, UNDER the reflex above -- ground
-            # truth, not a message, so it holds even with the radio dead.
-            self._enforce_geometry_gap(self.sim_time, dt)
-        elif self.reservations_enabled:
-            # Phase 6: standing is recomputed first -- the longer a robot has
-            # been stuck, the more it is owed (05_PATH_PLANNING section 9).
-            for robot in self.robots.values():
-                robot.update_priority(self.sim_time, dt)
-            for robot in self.robots.values():
-                robot.reserve_ahead(self.bus, self.sim_time)
-            for robot in self.robots.values():
-                robot.check_clearance(self.sim_time, dt)
-            for robot in self.robots.values():
-                note = robot.back_out_if_wedged(self.sim_time)
-                if note:
-                    self.decisions.append({
-                        "sim_time": round(self.sim_time, 2),
-                        "robot_id": robot.robot_id, "text": note,
-                    })
-                    del self.decisions[:-20]
-            # Phase 6: anyone held up decides whether to wait or go around.
-            if self.negotiation_enabled:
-                for robot in self.robots.values():
-                    if robot.consider_reroute(self.grid, self.sim_time, self.bus):
-                        self.reroutes += 1
-                        self.decisions.append({
-                            "sim_time": round(self.sim_time, 2),
-                            "robot_id": robot.robot_id,
-                            "text": robot.last_decision,
-                        })
-                        del self.decisions[:-20]
-            # Phase 7: anyone stuck far too long works out WHY, and either
-            # asks the robot in front to move or gets out of the way itself.
-            if self.deadlock_enabled:
-                for robot in self.robots.values():
-                    note = robot.answer_requests(self.grid, self.sim_time)
-                    if note is None:
-                        note = robot.resume_after_yielding(self.sim_time)
-                    if note is None:
-                        note = robot.report_jam(self.grid, self.bus, self.sim_time)
-                    if note:
-                        # Only count it as BROKEN when a robot actually moved.
-                        # Counting every request would report 37 "recoveries"
-                        # for one jam that never cleared.
-                        if "stepped aside" in note or "moving aside" in note:
-                            self.deadlocks_broken += 1
-                        self.decisions.append({
-                            "sim_time": round(self.sim_time, 2),
-                            "robot_id": robot.robot_id, "text": note,
-                        })
-                        del self.decisions[:-20]
+            if note is None:
+                note = robot.report_jam(self.grid, self.bus, self.sim_time)
+            if note:
+                # Only count it as BROKEN when a robot actually moved.
+                # Counting every request would report 37 "recoveries"
+                # for one jam that never cleared.
+                if "stepped aside" in note or "moving aside" in note:
+                    self.deadlocks_broken += 1
+                self.decisions.append({
+                    "sim_time": round(self.sim_time, 2),
+                    "robot_id": robot.robot_id, "text": note,
+                })
+                del self.decisions[:-20]
 
-            self._watch_for_jams()
-            # Phase 19: the finer backstop, UNDER square booking itself --
-            # ground truth, never a message, so it holds even with the radio
-            # dead.
-            self._enforce_geometry_gap(self.sim_time, dt)
-        elif self.coordination != "STOP_AND_WAIT":
-            # Phase 2/15's deliberately-blind baseline: reservations off and
-            # no other coordination on, to produce the honest "before"
-            # picture later phases drive to zero. The geometry backstop
-            # below is part of the SAME safety machinery as booking and the
-            # local reflex -- switching all of it off has to mean all of it,
-            # or this stops being the blind baseline it is built to be.
-            for robot in self.robots.values():
-                robot.hold = False
-                robot.blocked_by = None
-                if robot.status is RobotStatus.WAITING and robot.path:
-                    robot.status = RobotStatus.MOVING
+        self._watch_for_jams()
+        # Phase 19: the finer backstop, UNDER square booking itself --
+        # ground truth, never a message, so it holds even with the radio
+        # dead.
+        self._enforce_geometry_gap(self.sim_time, dt)
 
         # Remember where everyone was, so we can spot two robots swapping places.
         was_at: Dict[str, Cell] = {rid: r.cell for rid, r in self.robots.items()}
@@ -610,9 +469,8 @@ class World:
     def _sync_board(self) -> None:
         """Keep the dashboard's copy of the board in step with the robots'.
 
-        The dashboard is an observer. 02_ARCHITECTURE section 3: it watches,
-        it does not make the safety decisions -- and here it does not hand out
-        the work either.
+        The dashboard is an observer: it watches, it does not make safety
+        decisions -- and here it does not hand out the work either.
         """
         for robot in self.robots.values():
             for rid, mine in robot.board.tasks.items():
@@ -638,7 +496,7 @@ class World:
     def simulate_fake_message(self) -> dict:
         """Try to inject a forged message onto the bus, unsigned.
 
-        20_CYBERSECURITY's own demo: "simulate a fake robot message ->
+        The forged-message demo: "simulate a fake robot message ->
         authentication fails -> message is rejected -> event logged -> fleet
         continues safely." This is that button.
 
@@ -869,7 +727,7 @@ class World:
                 "message": f"{human_id} left. {len(self.humans)} people on the floor now."}
 
     def fail_robot(self, robot_id: str) -> Dict[str, object]:
-        """Switch a robot off mid-job. 08_SIMULATION Scenario 6."""
+        """Switch a robot off mid-job. Failure drill."""
         robot = self.get(robot_id)
         if robot is None:
             return {"ok": False, "message": f"There is no robot called {robot_id}."}
@@ -884,9 +742,8 @@ class World:
         robot.release_all(self.bus, self.sim_time)
         held = self.board.release_all(robot_id)
         # Tell everyone, or the other robots keep the job down as "R2's" and
-        # nobody ever picks it up. 06_TASK_ALLOCATION section 4. Continues
-        # the robot's own sequence space -- see the identical note in
-        # remove_robot().
+        # nobody ever picks it up. Continues the robot's own sequence space
+        # -- see the identical note in remove_robot().
         for task in held:
             self.bus.publish(security.seal(TaskClaim(
                 robot_id=robot_id, timestamp=self.sim_time, seq=robot.seq + 1,
@@ -1133,9 +990,7 @@ class World:
         reservation alone would ever catch -- neither is entering the
         other's booked resource, so nothing upstream has any reason to stop
         them. This runs UNDER all of that, on every robot's actual (x, y),
-        never a message, so it works exactly the same whether the coordination
-        above is negotiated booking, the stop-and-wait reflex, or a central
-        boss's command -- and just as well with the radio dead.
+        never a message, so it holds even with the radio dead.
 
         Deliberately as dumb as the person-proximity hard stop it mirrors: no
         priority, no negotiation, just "too close -- stop." Untangling it is
@@ -1178,8 +1033,8 @@ class World:
 
         2. HEAD-ON SWAP  -- they drove straight through each other and traded
                             places. They never share a square, so checking
-                            squares alone would MISS this. 05_PATH_PLANNING §5
-                            calls it an edge conflict: "Do not check only nodes."
+                            squares alone would MISS this. It is an edge
+                            conflict: "Do not check only nodes."
 
                                 R1 -> <- R2      becomes      <- R2   R1 ->
 
@@ -1187,8 +1042,8 @@ class World:
                             This is the one your eyes see on the dashboard.
 
         One crash counts ONCE. The world ticks 20 times a second, so without
-        this the same crash would be counted 20 times and the benchmark would
-        be nonsense.
+        this the same crash would be counted 20 times and the scoreboard
+        would be nonsense.
         """
         robots = self.physical_robots
         touching_now = set()
@@ -1491,9 +1346,9 @@ FLEET_START_CELLS = [
 def fleet_world(robots: int = 3, grid=None, **kwargs) -> World:
     """A warehouse with however many robots you ask for.
 
-    08_SIMULATION section 3 asks for 3, 5, 10 and 20 robots. More robots on the
-    same floor means more contention, which is the whole point: coordination
-    only earns its keep when robots actually get in each other's way.
+    More robots on the same floor means more contention, which is the whole
+    point: coordination only earns its keep when robots actually get in each
+    other's way.
     """
     world = World(grid=grid, **kwargs)
     if robots > len(FLEET_START_CELLS):
@@ -1504,16 +1359,10 @@ def fleet_world(robots: int = 3, grid=None, **kwargs) -> World:
 
 
 def phase2_world() -> World:
-    """Phase 2: three robots, each completely unaware of the other two.
+    """Phase 2: three robots navigating simultaneously.
 
-    Roadmap Phase 2 asks for: R1, R2, R3 navigating simultaneously.
-
-    There is deliberately NO collision handling here. These robots will drive
-    straight through each other, and the dashboard will count it. That count is
-    the "before" picture that Phases 3-7 have to drive down to zero.
-
-    Note this is NOT the stop-and-wait baseline for the 20% speed target --
-    that gets built separately in Phase 15.
+    Roadmap Phase 2 asks for: R1, R2, R3 navigating simultaneously, with
+    the full decentralized coordination stack (SIPP + PIBT) active.
     """
     world = World()
     world.add_robot(Robot(robot_id="R1", cell=Cell(2, 8)))

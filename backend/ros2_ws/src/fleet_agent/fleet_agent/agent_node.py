@@ -4,8 +4,7 @@ What this file does NOT do
 --------------------------
 It does not decide anything. Not the route, not who gets a square, not who
 gives way, not which job to bid for. All of that is shared/fleetx_core, the
-same code the laptop simulator runs and the same code that produced the
-benchmark numbers.
+same code the laptop simulator runs.
 
 What it DOES do is the wiring the simulator faked:
 
@@ -14,7 +13,7 @@ What it DOES do is the wiring the simulator faked:
     brain   -> Nav2 or /cmd_vel         make the wheels turn
     brain  <-> Ros2Bus                  talk to the other robots
 
-03_ROBOT_AND_ROS2_IMPLEMENTATION section 4 describes the loop this runs:
+The loop this runs:
 
     read local state -> publish state -> publish intent -> check other intents
     -> predict conflicts -> request reservation -> move safely -> replan
@@ -27,9 +26,8 @@ One waypoint at a time
 The brain plans the whole route. Nav2 is given only the NEXT SQUARE, and a new
 one each time the robot arrives. That keeps Nav2 doing what it is good at --
 local obstacle avoidance and smooth motion -- while route choice stays with the
-code that knows about bookings and other robots' intentions.
-03_ROBOT_AND_ROS2 section 7: "Keep your custom logic above/beside Nav2 rather
-than rewriting the entire navigation stack."
+code that knows about bookings and other robots' intentions. Custom logic
+stays above/beside Nav2 rather than rewriting the entire navigation stack.
 """
 
 import math
@@ -140,8 +138,7 @@ class FleetAgent(Node):
 
         Anything the map already knows about -- shelves, walls -- is ignored.
         What is left is a box somebody dropped, a pallet, a broken-down robot:
-        the things 05_PATH_PLANNING section 10 wants broadcast as a blocked
-        aisle. Squares we can see clearly and are empty get reported too, so a
+        the things worth broadcasting as a blocked aisle. Squares we can see clearly and are empty get reported too, so a
         block can be cleared early instead of waiting for its timer.
         """
         hits = set()

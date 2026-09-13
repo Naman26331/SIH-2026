@@ -4,16 +4,14 @@ PURE LOGIC ONLY. No web code, no ROS 2 code.
 
 A job is a TWO-LEG journey: go and collect something from a shelf, then take it
 to a packing station. That is what a warehouse robot actually does, and it is
-what the benchmark in Phase 15 will time.
+what the run statistics time.
 
 Nobody hands the jobs out
 -------------------------
-06_TASK_ALLOCATION section 3:
-
-    Task broadcast
-          -> R1 calculates bid = 7.2
-             R2 calculates bid = 4.1   <- winner
-             R3 calculates bid = 9.4
+Task broadcast
+      -> R1 calculates bid = 7.2
+         R2 calculates bid = 4.1   <- winner
+         R3 calculates bid = 9.4
 
 The order itself comes from outside the fleet -- a customer bought something.
 But WHO DOES IT is settled by the robots between themselves, so it keeps
@@ -21,7 +19,7 @@ working with the server switched off.
 
 The cheapest robot, not the nearest
 -----------------------------------
-06_TASK_ALLOCATION section 1: "Choose the robot with minimum expected cost, not
+"Choose the robot with minimum expected cost, not
 simply the nearest robot." A robot on 15% battery four squares away is the
 closest and the worst choice -- it will run flat halfway and the job has to be
 done again.
@@ -52,7 +50,7 @@ class TaskStatus(str, Enum):
 
 @dataclass
 class Task:
-    """One job. Fields follow the data model in 02_TECHNICAL_ARCHITECTURE §5."""
+    """One job."""
 
     task_id: str
     pickup: Cell
@@ -149,7 +147,7 @@ class Task:
 # ------------------------------------------------------------- the bid
 
 
-# Weights for the cost of a job, from 02_TECHNICAL_ARCHITECTURE section 6:
+# Weights for the cost of a job:
 #   C = w1*distance + w2*congestion + w3*battery + w4*urgency + w5*waiting
 W_DISTANCE = 1.0
 W_CONGESTION = 2.0

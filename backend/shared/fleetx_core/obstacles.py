@@ -5,7 +5,7 @@ PURE LOGIC ONLY. No web code, no ROS 2 code.
 A box falls off a pallet. Somebody leaves a trolley in an aisle. The map on
 file is now wrong, and nobody told the robots.
 
-05_PATH_PLANNING section 10:
+The pipeline every sighting follows:
 
     sensor detects obstacle
             -> local map update

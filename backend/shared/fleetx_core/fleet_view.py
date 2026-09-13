@@ -2,8 +2,8 @@
 
 PURE LOGIC ONLY. No web code, no ROS 2 code.
 
-04_DECENTRALIZED_FLEET_PROTOCOL section 4: every robot keeps its own temporary
-view of the fleet, and "it should tolerate stale information".
+Every robot keeps its own temporary view of the fleet, and that view must
+tolerate stale information.
 
 That last part matters. This notebook is NOT the truth. It is a collection of
 things other robots said a moment ago, some of which never arrived. Each robot
@@ -195,9 +195,8 @@ class FleetView:
         return [n for n in self.neighbours.values() if not n.is_stale(now, self.stale_after)]
 
     def stale(self, now: float) -> List[Neighbour]:
-        """Robots that have gone quiet. 03_ROBOT_AND_ROS2 section 5 says to
-        mark these, release their reservations, and avoid their last known path.
-        Phase 3 only does the marking."""
+        """Robots that have gone quiet. The fleet marks these, releases their
+        reservations, and avoids their last known path."""
         return [n for n in self.neighbours.values() if n.is_stale(now, self.stale_after)]
 
     def get(self, robot_id: str) -> Optional[Neighbour]:

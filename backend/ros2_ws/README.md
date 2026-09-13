@@ -277,9 +277,7 @@ It runs anywhere Python 3.9+ does, including a Mac, with no ROS and no installs:
 
 ```bash
 cd <repo>
-python3 -m unittest discover -s tests      # 251 tests
 python3 backend/tools/check_purity.py       # proves the brain has no ROS/web code
 uv run backend/run.py                       # simulation backend API
 uv run frontend/run.py                      # dashboard, separate terminal
-python3 -u backend/tools/final_table.py     # benchmark
 ```

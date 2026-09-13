@@ -11,9 +11,9 @@ ROS 2 topics. The brain cannot tell the difference, and that is the whole point:
         -----------+-----------
         |                     |
     InMemoryBus           Ros2Bus
-    (grid_sim)            (here, on DDS)
+    (simulator)           (here, on DDS)
 
-Topics are the ones named in 03_ROBOT_AND_ROS2_IMPLEMENTATION section 3.
+Topics mirror the brain's message set, one DDS topic per message kind.
 
 A note on quality of service
 ----------------------------
@@ -21,9 +21,8 @@ Positions and heartbeats use BEST_EFFORT with a shallow queue: they are
 replaced constantly, and a late one is worse than none. Bookings, claims and
 requests use RELIABLE with a deeper queue, because losing one of those changes
 who owns a square. The brain already copes with loss either way -- everything
-carries a sequence number and a timestamp, and 04_DECENTRALIZED_FLEET_PROTOCOL
-section 8 insists it must never assume a message arrives -- but there is no
-reason to throw away the ones that matter.
+carries a sequence number and a timestamp, and it never assumes a message
+arrives -- but there is no reason to throw away the ones that matter.
 """
 
 from collections import deque
@@ -49,7 +48,7 @@ from .brain import (BlockedAisle as BrainBlockedAisle,
                     WaitReport as BrainWaitReport,
                     YieldRequest as BrainYieldRequest)
 
-# Topic names, straight from 03_ROBOT_AND_ROS2_IMPLEMENTATION section 3.
+# Topic names, one per message kind.
 TOPICS = {
     "states": "/fleet/robot_states",
     "intents": "/fleet/robot_intents",

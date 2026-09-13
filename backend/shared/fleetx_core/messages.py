@@ -2,9 +2,8 @@
 
 PURE LOGIC ONLY. No web code, no ROS 2 code.
 
-Three messages, taken straight from 04_DECENTRALIZED_FLEET_PROTOCOL section 2
-and 03_ROBOT_AND_ROS2 sections 2-3. The field names deliberately match those
-documents so the ROS 2 version is a direct translation:
+Three messages form the core protocol, and the field names are shared
+with the ROS 2 message set so the bridge is a direct translation:
 
     Heartbeat      ->  fleet_msgs/BatteryStatus            -> /fleet/robot_states
     PoseUpdate     ->  fleet_msgs/RobotState               -> /fleet/robot_states
@@ -14,8 +13,7 @@ Every message carries:
   timestamp -- when it was said, so a listener can tell old news from new
   seq       -- a counter, so a listener can tell a message went missing
 
-04_DECENTRALIZED_FLEET_PROTOCOL section 8 insists on both: the protocol must
-never assume every message arrives.
+The protocol never assumes every message arrives.
 """
 
 from dataclasses import dataclass, field
@@ -35,7 +33,6 @@ class MessageType(str, Enum):
     TASK_ANNOUNCE = "TASK_ANNOUNCE"
     TASK_BID = "TASK_BID"
     TASK_CLAIM = "TASK_CLAIM"
-    CENTRAL_COMMAND = "CENTRAL_COMMAND"
 
 
 @dataclass
@@ -94,7 +91,6 @@ class IntentUpdate:
     occupy and WHEN it expects to be on each one. That is the difference
     between reacting to a crash and seeing it coming.
 
-    04_DECENTRALIZED_FLEET_PROTOCOL section 3:
         Position-only:  "R1 is here."
         Intent-aware:   "R1 is here. R1 wants to go there. R1 expects to occupy
                          these nodes. R1 expects to arrive at this time."
@@ -147,8 +143,8 @@ class IntentUpdate:
 class ConflictAlert:
     """"You and I are going to want the same square at the same time."
 
-    Spelled out in 04_DECENTRALIZED_FLEET_PROTOCOL section 2. Phase 4 only
-    announces it. Phase 6 is where the two robots argue about who yields.
+    Conflict detection only announces it. PIBT negotiation is where the two
+    robots sort out who yields.
     """
 
     robot_id: str          # the robot raising the alarm
@@ -177,9 +173,9 @@ class ConflictAlert:
 class PathReservation:
     """"I am booking this square for this stretch of time."
 
-    04_DECENTRALIZED_FLEET_PROTOCOL section 2. Everyone who hears it writes it
-    into their own copy of the reservation table. Nobody grants it -- ownership
-    is worked out separately, by a rule every robot applies identically.
+    Everyone who hears it writes it into their own copy of the reservation
+    table. Nobody grants it -- ownership is worked out separately, by a rule
+    every robot applies identically.
 
     cells holds one square for a NODE/TARGET booking, or two ends for an EDGE.
     """
@@ -212,9 +208,7 @@ class WaitReport:
     """"I am stuck, and this is who I am stuck behind."
 
     Everyone collects these and builds the little map of who is waiting for
-    whom. 05_PATH_PLANNING section 8 calls it a wait-for graph; a loop in it
-    is a deadlock. An extension to the protocol in 04, which stops at
-    conflict alerts.
+    whom -- a wait-for graph. A loop in it is a deadlock.
     """
 
     robot_id: str
@@ -238,7 +232,14 @@ class WaitReport:
 
 @dataclass
 class YieldRequest:
-    """Peer-to-peer PIBT priority inheritance/backtracking request."""
+    """Decentralized PIBT request: highest-priority robot keeps its route and
+    asks the blocking peer to move. The receiver inherits that priority and
+    either steps aside or recursively forwards it (backtracking via trail).
+
+    Only ``REQUEST`` is sent by the current core. ``action`` / ``conflict_id``
+    / ``winner`` remain on the wire solely so older peers' PROPOSE/YIELDING/ACK
+    packets still parse -- they are ignored, never acted on.
+    """
 
     robot_id: str                    # who is asking
     timestamp: float
@@ -302,8 +303,8 @@ class TaskAnnounce:
     """"There is a job going: collect from here, deliver to there."
 
     The order comes from outside the fleet -- somebody bought something. Who
-    DOES it is settled by the robots between themselves.
-    03_ROBOT_AND_ROS2 section 2 calls this Task.msg on /fleet/tasks.
+    DOES it is settled by the robots between themselves. On ROS 2 this
+    travels as Task.msg on /fleet/tasks.
     """
 
     robot_id: str                    # whoever put it on the air
@@ -361,48 +362,6 @@ class TaskBid:
 
 
 @dataclass
-class CentralCommand:
-    """Phase 18. "Do this job, and drive exactly this route" -- the ONE
-    message a centrally-planned robot ever acts on. Brain class only; there is
-    no peer-to-peer equivalent, because this is not something robots say to
-    each other. It is the one thing the boss says to a robot, and the one
-    thing that makes a centralised fleet stop working the moment it cannot be
-    delivered.
-
-    robot_id here means "who this is FOR", not "who sent it" -- the boss
-    sends every command, always. task_id empty means "just drive this route,
-    no job attached" (used for the empty-hands return-to-standby case, though
-    Phase 18 does not currently issue those).
-    """
-
-    robot_id: str                # who this command is FOR
-    timestamp: float
-    seq: int
-    task_id: str
-    pickup: Tuple[int, int]
-    dropoff: Tuple[int, int]
-    product: str
-    path: List[Tuple[int, int]]  # the exact route to drive, right now
-
-    # The boss, always -- robot_id above never means "who sent this", the
-    # same reasoning as TaskClaim.sender. Without this the bus routed on
-    # robot_id, excluded the one robot the command was addressed to from
-    # ever receiving it, and delivered it to everyone else instead.
-    sender: str = "BOSS"
-
-    type: str = field(default=MessageType.CENTRAL_COMMAND.value, init=False)
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "type": self.type, "robot_id": self.robot_id,
-            "timestamp": round(self.timestamp, 3), "seq": self.seq,
-            "task_id": self.task_id, "pickup": self.pickup,
-            "dropoff": self.dropoff, "product": self.product,
-            "path": self.path, "sender": self.sender,
-        }
-
-
-@dataclass
 class TaskClaim:
     """"I am taking that job" -- or picked it up, delivered it, or gave it up.
 
@@ -416,15 +375,14 @@ class TaskClaim:
     action: str
     cost: float = 0.0
 
-    # Phase 23. Almost always the same as robot_id -- a robot announcing its
-    # OWN claim. The one exception: a robot may release a job on behalf of a
-    # PEER it has noticed has gone quiet (03_ROBOT_AND_ROS2 section 5). There,
-    # robot_id names the quiet robot (so the release matches its held task),
-    # but `sender` names whoever is ACTUALLY speaking -- because a sequence
-    # number only means something within the counter that produced it, and
-    # that is always the sender's own, never the robot being spoken about.
-    # Empty means "same as robot_id", so every ordinary claim needs nothing
-    # extra here.
+    # Almost always the same as robot_id -- a robot announcing its OWN
+    # claim. The one exception: a robot may release a job on behalf of a
+    # PEER it has noticed has gone quiet. There, robot_id names the quiet
+    # robot (so the release matches its held task), but `sender` names
+    # whoever is ACTUALLY speaking -- because a sequence number only means
+    # something within the counter that produced it, and that is always the
+    # sender's own, never the robot being spoken about. Empty means "same as
+    # robot_id", so every ordinary claim needs nothing extra here.
     sender: str = ""
 
     type: str = field(default=MessageType.TASK_CLAIM.value, init=False)
@@ -523,13 +481,5 @@ def from_dict(data: Dict[str, Any]):
             robot_id=data["robot_id"], timestamp=data["timestamp"], seq=data["seq"],
             task_id=data["task_id"], action=data["action"], cost=data.get("cost", 0.0),
             sender=data.get("sender", ""),
-        )
-    if kind == MessageType.CENTRAL_COMMAND.value:
-        return CentralCommand(
-            robot_id=data["robot_id"], timestamp=data["timestamp"], seq=data["seq"],
-            task_id=data["task_id"], pickup=tuple(data["pickup"]),
-            dropoff=tuple(data["dropoff"]), product=data.get("product", ""),
-            path=[tuple(c) for c in data.get("path", [])],
-            sender=data.get("sender", "BOSS"),
         )
     raise ValueError(f"Unknown message type: {kind!r}")

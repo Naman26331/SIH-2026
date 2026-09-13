@@ -32,7 +32,7 @@ STAGING_CELLS = frozenset([
 
 
 class Scenarios:
-    """Sets up the demo situations from 08_SIMULATION_AND_TESTING §4."""
+    """Sets up the demo situations for the dashboard."""
 
     def __init__(self, world: World):
         self.world = world
@@ -147,7 +147,7 @@ class Scenarios:
         return routes
 
     def _head_on(self) -> str:
-        """08_SIMULATION Scenario 2 -- R1 and R2 driving straight at each other."""
+        """R1 and R2 driving straight at each other down one aisle."""
         self.auto = False
         self.orders = None
         self.world.resume_all()
@@ -159,7 +159,7 @@ class Scenarios:
         return "Head-on: R1 and R2 sent down the same aisle at each other."
 
     def _intersection(self) -> str:
-        """08_SIMULATION Scenario 3 -- three robots aimed at one junction."""
+        """Three robots aimed at one junction."""
         self.auto = False
         self.orders = None
         self.world.resume_all()
@@ -265,10 +265,8 @@ PRODUCTS = [
 class OrderGenerator:
     """Turns a clock into a stream of orders.
 
-    Seeded on purpose. 08_SIMULATION section 5: "Create identical workloads."
-    A benchmark comparing FLEET-X against stop-and-wait is worthless unless
-    both sides run the SAME jobs in the SAME order, so the same seed must
-    always produce the same list.
+    Seeded on purpose: the same seed must always produce the same list, so
+    every run is repeatable and comparable.
     """
 
     def __init__(self, world: World, seed: int = 1, every: float = 6.0,
@@ -347,8 +345,8 @@ class OrderGenerator:
         # This was not put in to flatter the predictor. Before it, orders were
         # uniform random, the model correctly reported "no idea" for ever, and
         # pre-positioning could never be anything but noise -- there was nothing
-        # there to learn. It is seeded like everything else, so both sides of
-        # the benchmark still get the identical stream of orders.
+        # there to learn. It is seeded like everything else, so every run
+        # still gets the identical stream of orders.
         shelf = self._pick_shelf_with_a_pattern(now)
         # Phase 21. Off by default. On: a picker does not walk to the shelf
         # they thought of first if a closer bin has the same product --

@@ -1,8 +1,7 @@
 """PART 1 and PART 2 -- proving a message really came from inside this fleet.
 
-20_CYBERSECURITY_AND_TRUSTED_DECENTRALIZED_COMMUNICATION asks for two things:
-a message cannot be forged, and an old one cannot be replayed to fool a robot
-later. Kept deliberately small, so the whole mechanism can be read in one
+Two things are asked of this layer: a message cannot be forged, and an old
+one cannot be replayed to fool a robot later. Kept deliberately small, so the
 sitting rather than taken on faith.
 
 How it works
@@ -25,9 +24,8 @@ How it works
 3. Every message that arrives is CHECKED before the robot brain ever reads
    it. No tag, or the wrong tag: dropped, and logged. A sequence number
    already seen, or lower than one already accepted from the same sender: a
-   replay, dropped too -- 04_DECENTRALIZED_FLEET_PROTOCOL and doc 20 both
-   call this out directly: reject previously processed message IDs and old
-   timestamps.
+    replay, dropped too -- previously processed message IDs and old
+    timestamps are rejected directly.
 
 Nothing here touches steering, safety or the reservation table. Authentication
 only decides whether a message is read at all; everything after that is

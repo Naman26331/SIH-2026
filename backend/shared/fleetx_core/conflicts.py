@@ -16,8 +16,7 @@ Now it is just double-booking a meeting room:
     R2        |========|       3.4 -> 4.0
                   ^ overlap = conflict
 
-05_PATH_PLANNING section 7 says exactly this: same resource AND overlapping
-time window means a conflict.
+Same resource AND overlapping time window means a conflict.
 
 This same table of bookings becomes the reservation system in Phase 5. Here we
 only READ it and complain. There, robots start booking slots in it.
