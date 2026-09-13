@@ -1421,6 +1421,9 @@ class World:
         return {
             "sim_time": round(self.sim_time, 2),
             "ticks": self.ticks,
+            "planner": "SIPP",
+            "coordination_algorithm": "PIBT",
+            "architecture": "DECENTRALIZED_P2P",
             # The map draws each robot's planned route as a short dotted line;
             # past a dozen squares it is off the edge of anything anyone looks
             # at, so there is no point sending the rest twenty times a second.

@@ -9,7 +9,7 @@ library. It is shared, unchanged, by:
 Keeping it clean is what stops the brain from being written twice.
 """
 
-from .astar import find_path, find_space_time_path, manhattan, uniform_cost
+from .astar import find_path, find_sipp_path, find_space_time_path, manhattan, uniform_cost
 from .bus import FleetBus, InMemoryBus
 from .conflicts import (DEFAULT_CLEARANCE, DEFAULT_HORIZON, Conflict, ConflictKind,
                         Plan, Window, build_plan, find_conflicts)
@@ -42,7 +42,7 @@ __all__ = [
     "Inventory", "Shelf", "CATALOGUE", "Human", "CentralCommand",
     "CentralPlanner", "Reslotter", "SlotMove",
     "Cell", "CellKind", "Grid", "default_grid",
-    "find_path", "find_space_time_path", "manhattan", "uniform_cost",
+    "find_path", "find_sipp_path", "find_space_time_path", "manhattan", "uniform_cost",
     "Robot", "RobotStatus",
     "FleetBus", "InMemoryBus",
     "FleetView", "Neighbour", "DEFAULT_STALE_AFTER",

@@ -14,6 +14,7 @@ route if one exists, and it is easy to explain to a judge (see 11_SIH_DEMO).
 """
 
 import heapq
+import math
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .grid import Cell, Grid
@@ -117,10 +118,35 @@ def find_space_time_path(
     max_expansions: int = 12_000,
     clearance: float = 0.35,
 ) -> Optional[List[Cell]]:
-    """Bounded A* over ``(cell, time)`` with a real WAIT action.
+    """Compatibility name for the SIPP planner used by older callers."""
+    return find_sipp_path(
+        grid, start, goal, table=table, robot_id=robot_id, now=now,
+        speed=speed, cost_fn=cost_fn, blocked=blocked,
+        max_time_steps=max_time_steps, max_expansions=max_expansions,
+        clearance=clearance,
+    )
 
-    Every candidate checks both its destination cell and traversed edge in the
-    robot's local reservation table. No shared/global table is required.
+
+def find_sipp_path(
+    grid: Grid,
+    start: Cell,
+    goal: Cell,
+    *,
+    table: Optional[ReservationTable],
+    robot_id: str,
+    now: float,
+    speed: float,
+    cost_fn: Optional[CostFn] = None,
+    blocked: Optional[Set[Cell]] = None,
+    max_time_steps: int = 200,
+    max_expansions: int = 12_000,
+    clearance: float = 0.35,
+) -> Optional[List[Cell]]:
+    """Safe Interval Path Planning using only this robot's local knowledge.
+
+    Unlike space-time A*, contiguous free timesteps at a cell are represented
+    by one safe interval. Reservations remain peer-to-peer DDS facts; SIPP is
+    independently executed by every robot and has no global planner.
     """
     cost_fn = cost_fn or uniform_cost
     blocked = blocked or set()
@@ -130,76 +156,139 @@ def find_space_time_path(
         return [start]
 
     dwell = 1.0 / max(speed, 0.1)
-    # Long enough for a useful detour/wait, but never let a small map create
-    # hundreds of pointless time layers. The expansion cap remains the final
-    # CPU guard for dense traffic.
     max_time_steps = min(max_time_steps,
                          max(int(manhattan(start, goal)) + 32, 48))
+    horizon = now + max_time_steps * dwell
+    interval_cache: Dict[Cell, List[Tuple[float, float]]] = {}
+
+    def safe_intervals(cell: Cell) -> List[Tuple[float, float]]:
+        cached = interval_cache.get(cell)
+        if cached is not None:
+            return cached
+        denied: List[Tuple[float, float]] = []
+        if table is not None:
+            resources = [node_key(cell)]
+            if cell == goal:
+                resources.append(target_key(cell))
+            for resource in resources:
+                for left, right in table.unavailable_intervals(
+                        robot_id, resource, now - clearance, horizon + clearance):
+                    denied.append((left, right))
+        denied.sort()
+        merged: List[Tuple[float, float]] = []
+        for left, right in denied:
+            left, right = max(now, left), min(horizon, right)
+            if right <= left:
+                continue
+            if merged and left <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], right))
+            else:
+                merged.append((left, right))
+        safe: List[Tuple[float, float]] = []
+        cursor = now
+        for left, right in merged:
+            if cursor < left:
+                safe.append((cursor, left))
+            cursor = max(cursor, right)
+        if cursor < horizon:
+            safe.append((cursor, horizon))
+        interval_cache[cell] = safe
+        return safe
+
+    start_intervals = safe_intervals(start)
+    start_index = next((i for i, (left, right) in enumerate(start_intervals)
+                        if left <= now < right), None)
+    if start_index is None:
+        return None
+
     State = Tuple[Cell, int]
-    origin: State = (start, 0)
-    frontier: List[Tuple[float, int, State]] = [(manhattan(start, goal), 0, origin)]
-    came_from: Dict[State, State] = {}
-    cost_so_far: Dict[State, float] = {origin: 0.0}
+    origin: State = (start, start_index)
+    frontier: List[Tuple[float, int, float, State]] = [
+        (now + manhattan(start, goal) * dwell, 0, now, origin)
+    ]
+    arrival: Dict[State, float] = {origin: now}
+    came_from: Dict[State, Tuple[State, float]] = {}
     counter = 1
     expansions = 0
 
+    def align_to_tick(value: float) -> float:
+        slots = max(0, math.ceil((value - now) / dwell - 1e-9))
+        return now + slots * dwell
+
+    def edge_delay(a: Cell, b: Cell, depart: float) -> float:
+        if table is None:
+            return align_to_tick(depart)
+        probe = align_to_tick(depart)
+        while probe + dwell <= horizon:
+            conflicts = table.unavailable_intervals(
+                robot_id, edge_key(a, b), probe - clearance,
+                probe + dwell + clearance,
+            )
+            if not conflicts:
+                return probe
+            probe = align_to_tick(
+                max(probe, max(end for _, end in conflicts) + clearance))
+        return float("inf")
+
+    goal_state: Optional[State] = None
     while frontier and expansions < max_expansions:
-        _, _, state = heapq.heappop(frontier)
-        current, step = state
+        _, _, queued_arrival, state = heapq.heappop(frontier)
+        if queued_arrival != arrival.get(state):
+            continue
+        current, interval_index = state
+        here_at = queued_arrival
         expansions += 1
         if current == goal:
-            route = [current]
-            while state != origin:
-                state = came_from[state]
-                route.append(state[0])
-            route.reverse()
-            return route
-        if step >= max_time_steps:
-            continue
+            goal_state = state
+            break
 
-        depart = now + step * dwell
-        arrive = depart + dwell
-        # Waiting is a first-class action, considered after movement so an
-        # equally good clear route does not acquire pointless pauses.
-        actions = list(grid.neighbours(current)) + [current]
-        for nxt in actions:
+        _, current_end = safe_intervals(current)[interval_index]
+        for nxt in grid.neighbours(current):
             if nxt in blocked:
                 continue
-            if table is not None:
-                node_owner = table.blocked_by(
-                    robot_id, node_key(nxt), arrive - clearance,
-                    arrive + dwell + clearance,
-                )
-                if node_owner is not None:
+            for nxt_index, (safe_start, safe_end) in enumerate(safe_intervals(nxt)):
+                candidate = max(here_at, safe_start + clearance - dwell)
+                depart = edge_delay(current, nxt, candidate)
+                reach = depart + dwell
+                if depart + clearance > current_end:
+                    break
+                if reach - clearance < safe_start:
+                    depart = edge_delay(
+                        current, nxt, safe_start + clearance - dwell)
+                    reach = depart + dwell
+                if reach + dwell + clearance > safe_end:
                     continue
-                if nxt != current:
-                    edge_owner = table.blocked_by(
-                        robot_id, edge_key(current, nxt), depart - clearance,
-                        arrive + clearance,
-                    )
-                    if edge_owner is not None:
-                        continue
-                if nxt == goal:
-                    lease_owner = table.blocked_by(
-                        robot_id, target_key(goal), arrive - clearance,
-                        arrive + dwell + clearance,
-                    )
-                    if lease_owner is not None:
-                        continue
+                nxt_state = (nxt, nxt_index)
+                if reach >= arrival.get(nxt_state, float("inf")):
+                    continue
+                arrival[nxt_state] = reach
+                came_from[nxt_state] = (state, depart)
+                # Time is primary. Tiny local cost tie-break retains aisle
+                # preference without invalidating SIPP's earliest-arrival state.
+                tie_cost = max(0.0, cost_fn(current, nxt) - 1.0) * 1e-4
+                heapq.heappush(frontier, (
+                    reach + manhattan(nxt, goal) * dwell + tie_cost,
+                    counter, reach, nxt_state,
+                ))
+                counter += 1
 
-            nxt_state = (nxt, step + 1)
-            wait_cost = 1.1 if nxt == current else cost_fn(current, nxt)
-            new_cost = cost_so_far[state] + wait_cost
-            if new_cost >= cost_so_far.get(nxt_state, float("inf")):
-                continue
-            cost_so_far[nxt_state] = new_cost
-            came_from[nxt_state] = state
-            heapq.heappush(frontier, (
-                new_cost + manhattan(nxt, goal), counter, nxt_state,
-            ))
-            counter += 1
+    if goal_state is None:
+        return None
 
-    return None
+    timed: List[Tuple[Cell, float]] = [(goal_state[0], arrival[goal_state])]
+    state = goal_state
+    while state != origin:
+        previous, _ = came_from[state]
+        timed.append((previous[0], arrival[previous]))
+        state = previous
+    timed.reverse()
+
+    route = [timed[0][0]]
+    for (previous, previous_at), (cell, cell_at) in zip(timed, timed[1:]):
+        waits = max(0, int(round((cell_at - previous_at) / dwell)) - 1)
+        route.extend([previous] * waits)
+        route.append(cell)
+    return route
 
 
 def _rebuild(came_from: Dict[Cell, Cell], start: Cell, goal: Cell) -> List[Cell]:

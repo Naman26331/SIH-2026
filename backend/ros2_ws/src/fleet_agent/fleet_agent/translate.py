@@ -233,6 +233,9 @@ def yield_to_ros(m: YieldRequest) -> YieldRequestMsg:
     out.action = m.action
     out.conflict_id = m.conflict_id
     out.winner = m.winner
+    out.priority = int(m.priority)
+    out.root = m.root
+    out.trail = list(m.trail)
     return out
 
 
@@ -338,6 +341,7 @@ def ros_to_yield(m: YieldRequestMsg) -> YieldRequest:
         robot_id=m.robot_id, timestamp=from_ros_time(m.stamp), seq=m.seq,
         target=m.target, resource=(int(m.resource[0]), int(m.resource[1])),
         reason=m.reason, action=m.action, conflict_id=m.conflict_id,
-        winner=m.winner)
+        winner=m.winner, priority=m.priority, root=m.root,
+        trail=list(m.trail))
     out.tag = m.tag
     return out

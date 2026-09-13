@@ -56,6 +56,7 @@
     flex:none; font-size:10px; letter-spacing:.12em; text-transform:uppercase;
     color:var(--muted); font-weight:600; margin-right:4px;
   }
+  .algo{font:10px var(--mono); color:var(--green); letter-spacing:.06em}
   .top-controls .controls-buttons{display:flex !important; flex:none; flex-wrap:nowrap !important; gap:7px; margin:0; grid-template-columns:none}
   .controls-buttons button{min-width:110px}
   .controls-rate{flex:none; min-width:220px}
@@ -350,6 +351,7 @@
 
       <div class="top-controls">
         <div class="controls-title">Controls</div>
+        <div class="algo" id="algo">SIPP · PIBT · P2P</div>
         <div id="haltBanner"></div>
         <div class="btns controls-buttons" style="margin-bottom:0">
           <button data-fleet="add">+ Add robot</button>
@@ -615,6 +617,8 @@ function receiveState(raw){
   else next = packet; // compatibility with older backend
   updateRobotMotion(prev, next, performance.now());
   STATE = next;
+  const algo = document.getElementById("algo");
+  if (algo) algo.textContent = `${next.planner || "SIPP"} · ${next.coordination_algorithm || "PIBT"} · P2P`;
   setLive(true);
 
   const now = performance.now();

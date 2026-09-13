@@ -238,11 +238,7 @@ class WaitReport:
 
 @dataclass
 class YieldRequest:
-    """"Excuse me, you are in my way -- please move."
-
-    Sent to a robot that is parked on a square somebody needs, or to the one
-    chosen to give way and break a circular wait.
-    """
+    """Peer-to-peer PIBT priority inheritance/backtracking request."""
 
     robot_id: str                    # who is asking
     timestamp: float
@@ -253,6 +249,9 @@ class YieldRequest:
     action: str = "REQUEST"          # REQUEST, PROPOSE, YIELDING or ACK
     conflict_id: str = ""            # stable id for one pairwise conflict
     winner: str = ""                 # elected robot that keeps its route
+    priority: int = 0                 # inherited root priority for request chain
+    root: str = ""                    # robot that started local chain
+    trail: List[str] = field(default_factory=list)  # loop detection
 
     type: str = field(default=MessageType.YIELD_REQUEST.value, init=False)
 
@@ -264,7 +263,8 @@ class YieldRequest:
             "resource": [self.resource[0], self.resource[1]],
             "reason": self.reason,
             "action": self.action, "conflict_id": self.conflict_id,
-            "winner": self.winner,
+            "winner": self.winner, "priority": self.priority,
+            "root": self.root, "trail": list(self.trail),
         }
 
 
@@ -496,6 +496,8 @@ def from_dict(data: Dict[str, Any]):
             action=data.get("action", "REQUEST"),
             conflict_id=data.get("conflict_id", ""),
             winner=data.get("winner", ""),
+            priority=data.get("priority", 0), root=data.get("root", ""),
+            trail=list(data.get("trail", [])),
         )
     if kind == MessageType.BLOCKED_AISLE.value:
         return BlockedAisle(

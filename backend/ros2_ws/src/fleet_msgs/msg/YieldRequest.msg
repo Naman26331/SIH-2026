@@ -15,3 +15,6 @@ string reason               # PARKED, CYCLE or BOXED_IN
 string action               # REQUEST, PROPOSE, YIELDING or ACK
 string conflict_id          # stable id shared by the robot pair
 string winner               # robot that keeps its current route
+int32 priority              # PIBT priority inherited through local chain
+string root                 # peer that started the chain
+string[] trail              # visited peers; prevents request loops

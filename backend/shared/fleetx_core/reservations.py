@@ -185,6 +185,32 @@ class ReservationTable:
             return None
         return holder.robot_id
 
+    def unavailable_intervals(self, robot_id: str, resource: ResourceKey,
+                              start: float, end: float) -> List[Tuple[float, float]]:
+        """Intervals where another robot owns ``resource``.
+
+        SIPP asks this of the robot's local reservation copy. Splitting at all
+        claim boundaries preserves deterministic priority ownership even when
+        claims overlap; no global reservation service is consulted.
+        """
+        boundaries = {start, end}
+        for claim in self.claims_on(resource, start, end):
+            boundaries.add(max(start, claim.start))
+            boundaries.add(min(end, claim.end))
+        points = sorted(boundaries)
+        unavailable: List[Tuple[float, float]] = []
+        for left, right in zip(points, points[1:]):
+            if right <= left:
+                continue
+            owner = self.owner(resource, left, right)
+            if owner is None or owner.robot_id == robot_id:
+                continue
+            if unavailable and abs(unavailable[-1][1] - left) < 1e-9:
+                unavailable[-1] = (unavailable[-1][0], right)
+            else:
+                unavailable.append((left, right))
+        return unavailable
+
     def rows(self, now: float, limit: int = 14) -> List[Dict[str, object]]:
         """The table as the dashboard shows it, soonest first."""
         out: List[Reservation] = []

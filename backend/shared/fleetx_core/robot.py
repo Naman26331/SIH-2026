@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, Iterable, List, Optional
 
-from .astar import find_space_time_path
+from .astar import find_sipp_path
 from .conflicts import (DEFAULT_CLEARANCE, DEFAULT_HORIZON, Conflict, Plan,
                         build_plan, find_conflicts)
 from .deadlock import STUCK_SECONDS, WaitForGraph, Waiting, choose_victim
@@ -157,6 +157,9 @@ class Robot:
     _reroute_at: float = -99.0
     _reroute_cooldown_until: float = 0.0
     wait_credit: float = 0.0        # fades slowly, see priority.py
+    _pibt_priority: int = 0         # inherited priority in local PIBT chain
+    _pibt_until: float = 0.0        # inheritance is a renewable short lease
+    _pibt_root: str = ""             # peer that started this chain
 
     # --- breaking jams that will never clear themselves (Phase 7) ---
     waits: Optional[WaitForGraph] = None    # who it has heard is stuck behind whom
@@ -295,8 +298,8 @@ class Robot:
     def plan_path(self, grid: Grid, start: Cell, goal: Cell, now: float,
                   cost_fn: Optional[Callable] = None,
                   blocked: Optional[set] = None) -> Optional[List[Cell]]:
-        """The one bounded space-time planner used by every robot journey."""
-        return find_space_time_path(
+        """The decentralized SIPP planner used by every robot journey."""
+        return find_sipp_path(
             grid, start, goal, table=self.table, robot_id=self.robot_id,
             now=now, speed=self.travel_speed(), cost_fn=cost_fn,
             blocked=blocked if blocked is not None else self.blocked_map.cells(now),
@@ -760,11 +763,12 @@ class Robot:
 
         # 4b. Any request we were asked to pass along.
         if self._pending_ask is not None:
-            who, side = self._pending_ask
+            who, side, root, trail, priority = self._pending_ask
             self._pending_ask = None
             self._publish(bus, YieldRequest(
                 robot_id=self.robot_id, timestamp=now, seq=self.seq,
-                target=who, resource=(side.x, side.y), reason="BOXED_IN",
+                target=who, resource=(side.x, side.y), reason="PIBT",
+                priority=priority, root=root, trail=trail,
             ))
 
         # Pairwise conflict handshake. The elected loser says YIELDING; the
@@ -775,6 +779,8 @@ class Robot:
                 robot_id=self.robot_id, timestamp=now, seq=self.seq,
                 target=target, resource=resource, reason="CONFLICT",
                 action=action, conflict_id=conflict_id, winner=winner,
+                priority=self.priority, root=self._pibt_root or self.robot_id,
+                trail=[self.robot_id],
             ))
         self._pending_negotiations.clear()
 
@@ -1171,6 +1177,9 @@ class Robot:
         self.waiting_since = None
         self.wait_credit = 0.0
         self.priority = self.base_priority
+        self._pibt_priority = 0
+        self._pibt_until = 0.0
+        self._pibt_root = ""
         self._next_heartbeat = 0.0
         self._next_pose = 0.0
         self._last_intent_key = None
@@ -1548,16 +1557,20 @@ class Robot:
     DETOUR_FACTOR = 2.5         # ...plus this multiple of what is left
 
     def update_priority(self, now: float, dt: float) -> None:
-        """Recompute standing. The longer we wait, the more we are owed."""
+        """Recompute local priority, then apply temporary PIBT inheritance."""
         self.wait_credit = next_wait_credit(self.wait_credit, self.hold, dt)
         # Rounded to a whole point so the number other robots hear steps up
         # cleanly instead of drifting every tick.
-        self.priority = quantise(effective_priority(
+        local_priority = quantise(effective_priority(
             base=self.base_priority,
             waiting=self.wait_credit,
             battery=self.battery,
             task_priority=self.task_priority,
         ))
+        if now >= self._pibt_until:
+            self._pibt_priority = 0
+            self._pibt_root = ""
+        self.priority = max(local_priority, self._pibt_priority)
 
     def consider_reroute(self, grid: Grid, now: float, bus=None) -> bool:
         """Held up: wait it out, or take the long way round?
@@ -1575,55 +1588,32 @@ class Robot:
             return False
         if self.waited_for(now) < self.PATIENCE:
             return False                       # be patient first
-        # A named peer can negotiate. Both calculate the same winner from the
-        # same priority rule; only the loser may replan. The old "desperate"
-        # escape hatch bypassed this rule and made both robots detour.
+        # Distributed PIBT: highest-priority peer keeps its route and asks the
+        # blocking peer to move. Receiver inherits that priority and either
+        # steps aside or recursively forwards the request. Nobody computes a
+        # fleet-wide solution and only the displaced chain changes route.
         peer = self.blocked_by
         if peer and not peer.startswith("person:") and peer not in (
                 "unknown", "obstacle", "unreserved"):
             other = self.fleet.get(peer)
             if other is not None:
-                resource = self.path[0]
-                conflict_id = self._conflict_id(peer)
-                state = self._negotiations.get(conflict_id)
-                if state is None or state["expires"] <= now:
-                    i_yield = yields_to(
-                        self.priority, self.robot_id,
-                        other.priority, other.robot_id)
-                    winner = peer if i_yield else self.robot_id
-                    state = {
-                        "peer": peer, "winner": winner, "expires": 0.0,
-                        "last_sent": -99.0, "state": "NEW",
-                    }
-                    self._negotiations[conflict_id] = state
-                else:
-                    # Freeze the election for the lock's lifetime. Fresh
-                    # priority updates cannot make both sides swap roles.
-                    winner = str(state["winner"])
-                    i_yield = winner != self.robot_id
-                state["expires"] = now + self.NEGOTIATION_LOCK
-
-                if now - state["last_sent"] >= self.NEGOTIATION_RETRY:
-                    action = "YIELDING" if i_yield else "PROPOSE"
-                    self._send_negotiation(
-                        bus, now, action, peer, resource, conflict_id, winner)
-                    state["last_sent"] = now
-                    if state["state"] != "ACK":
-                        state["state"] = action
-
-                if not i_yield:
-                    self.status = RobotStatus.NEGOTIATING
+                i_yield = yields_to(
+                    self.priority, self.robot_id,
+                    other.priority, other.robot_id)
+                if i_yield:
+                    self.status = RobotStatus.YIELDING
                     self.last_decision = (
-                        f"{self.robot_id} won {conflict_id}; {peer} yields"
-                    )
+                        f"{self.robot_id} waits for PIBT request from {peer}")
                     return False
-
-                self.status = RobotStatus.YIELDING
-                if state["state"] != "ACK":
-                    self.last_decision = (
-                        f"{self.robot_id} waits for {peer} ACK before rerouting"
-                    )
-                    return False
+                last = self._asked_at.get(peer, -99.0)
+                if now - last >= self.NEGOTIATION_RETRY:
+                    self._asked_at[peer] = now
+                    self.asked += 1
+                    self._ask_to_move(bus, now, peer, "PIBT")
+                self.status = RobotStatus.NEGOTIATING
+                self.last_decision = (
+                    f"{self.robot_id} PIBT priority passes through {peer}")
+                return False
 
         if now < self._reroute_cooldown_until:
             return False
@@ -1719,6 +1709,8 @@ class Robot:
             robot_id=self.robot_id, timestamp=now, seq=self.seq,
             target=target, resource=(resource.x, resource.y), reason="CONFLICT",
             action=action, conflict_id=conflict_id, winner=winner,
+            priority=self.priority, root=self._pibt_root or self.robot_id,
+            trail=[self.robot_id],
         ))
 
     # ----------------------------- getting out of the way when idle
@@ -2629,7 +2621,20 @@ class Robot:
 
         elif isinstance(message, YieldRequest) and message.target == self.robot_id:
             if message.action == "REQUEST":
-                self._make_way_for = (message.robot_id, Cell(*message.resource), now)
+                root = message.root or message.robot_id
+                trail = list(message.trail) or [message.robot_id]
+                # Seeing ourselves means request chain looped. Refusing that
+                # edge is distributed PIBT backtracking, not central recovery.
+                if self.robot_id not in trail:
+                    inherited = max(message.priority, self.priority)
+                    self._pibt_priority = max(self._pibt_priority, inherited)
+                    self._pibt_until = max(
+                        self._pibt_until, now + self.NEGOTIATION_LOCK)
+                    self._pibt_root = root
+                    self._make_way_for = (
+                        message.robot_id, Cell(*message.resource), now,
+                        root, trail + [self.robot_id], inherited,
+                    )
             else:
                 self._ingest_negotiation(message, now)
 
@@ -2660,6 +2665,10 @@ class Robot:
         })
         if message.action == "PROPOSE" and message.winner == peer:
             # We are the designated loser. Confirm it; only we may replan.
+            self._pibt_priority = max(self._pibt_priority, message.priority)
+            self._pibt_until = max(
+                self._pibt_until, now + self.NEGOTIATION_LOCK)
+            self._pibt_root = message.root or peer
             self.status = RobotStatus.YIELDING
             self._pending_negotiations.append((
                 "YIELDING", peer, message.resource,
@@ -2748,6 +2757,8 @@ class Robot:
         self._publish(bus, YieldRequest(
             robot_id=self.robot_id, timestamp=now, seq=self.seq,
             target=target, resource=(wanted.x, wanted.y), reason=reason,
+            priority=self.priority, root=self._pibt_root or self.robot_id,
+            trail=[self.robot_id],
         ))
 
     def answer_requests(self, grid: Grid, now: float) -> Optional[str]:
@@ -2755,7 +2766,7 @@ class Robot:
         pending = getattr(self, "_make_way_for", None)
         if pending is None:
             return None
-        asker, wanted, asked_at = pending
+        asker, wanted, asked_at, root, trail, inherited = pending
         self._make_way_for = None
         if now - asked_at > 3.0:
             return None                          # stale request, ignore
@@ -2766,22 +2777,27 @@ class Robot:
         # Boxed in: every way out has somebody in it. Refusing would leave the
         # queue stuck for ever, so pass the request along to whoever is
         # blocking US -- anyone except the robot that just asked.
-        return self._pass_the_request_along(grid, now, asker, wanted)
+        forwarded = self._pass_the_request_along(
+            grid, now, asker, wanted, root, trail, inherited)
+        # Keep trying until downstream backtracking frees a candidate or this
+        # short request lease expires. No peer owns global recovery state.
+        self._make_way_for = pending
+        return forwarded
 
     def _pass_the_request_along(self, grid: Grid, now: float, asker: str,
-                                wanted: Cell) -> Optional[str]:
+                                wanted: Cell, root: str, trail: List[str],
+                                inherited: int) -> Optional[str]:
         for side in grid.neighbours(self.cell):
             who = self._immediate_side_blocker(side, now)
-            if who is None or who == asker:
+            if who is None or who == asker or who in trail:
                 continue
             last = self._asked_at.get(who)
             if last is not None and now - last < self.ASK_COOLDOWN:
                 continue
             self._asked_at[who] = now
             self.asked += 1
-            self._pending_ask = (who, side)
-            return (f"{self.robot_id} is boxed in - passing {asker}'s request "
-                    f"on to {who}")
+            self._pending_ask = (who, side, root, list(trail), inherited)
+            return f"{self.robot_id} PIBT-backtracks locally through {who}"
         return None
 
     def _immediate_side_blocker(self, side: Cell, now: float) -> Optional[str]:
