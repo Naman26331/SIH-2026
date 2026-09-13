@@ -1308,8 +1308,7 @@ function renderTasks(){
   const k = STATE.kpis;
   document.getElementById("taskNote").textContent =
     (k.task_created ? `— ${k.task_done}/${k.task_created} done`
-                    : "— press Start orders to give them work") +
-    (k.task_avg_task_time ? `, avg ${k.task_avg_task_time}s` : "");
+                    : "— press Start orders to give them work");
 
   const rows = STATE.tasks || [];
   setHTML("tasks", rows.length
@@ -1596,8 +1595,6 @@ function renderKpis(){
     ["Collisions", k.collisions,        k.collisions ? "bad" : "good"],
     ["Jobs done",  k.task_created ? `${k.task_done}/${k.task_created}` : "none yet",
                    k.task_done ? "good" : ""],
-    ["Avg job",    k.task_avg_task_time ? k.task_avg_task_time + "s" : "—", ""],
-    ["Jobs/hr",    k.task_tasks_per_hour || 0, ""],
     ["Deadlocked", k.deadlocked,        k.deadlocked ? "bad" : "good"],
     ["On sensors", k.safe_mode,         k.safe_mode ? "warn" : "good"],
     ["Obstacles",  k.obstacles,         k.obstacles ? "warn" : ""],

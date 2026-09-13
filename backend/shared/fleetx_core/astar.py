@@ -143,6 +143,7 @@ def find_sipp_path(
     max_time_steps: int = 200,
     max_expansions: int = 12_000,
     clearance: float = 0.35,
+    ignore_future_from: Optional[Set[str]] = None,
 ) -> Optional[List[Cell]]:
     """Safe Interval Path Planning using only this robot's local knowledge.
 
@@ -175,7 +176,8 @@ def find_sipp_path(
                 resources.append(target_key(cell))
             for resource in resources:
                 for left, right in table.unavailable_intervals(
-                        robot_id, resource, now - clearance, horizon + clearance):
+                        robot_id, resource, now - clearance, horizon + clearance,
+                        ignore_future_from=ignore_future_from):
                     denied.append((left, right))
         denied.sort()
         merged: List[Tuple[float, float]] = []
@@ -226,6 +228,7 @@ def find_sipp_path(
             conflicts = table.unavailable_intervals(
                 robot_id, edge_key(a, b), probe - clearance,
                 probe + dwell + clearance,
+                ignore_future_from=ignore_future_from,
             )
             if not conflicts:
                 return probe

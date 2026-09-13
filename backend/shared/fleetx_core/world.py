@@ -336,7 +336,8 @@ class World:
                 # Only count it as BROKEN when a robot actually moved.
                 # Counting every request would report 37 "recoveries"
                 # for one jam that never cleared.
-                if "stepped aside" in note or "moving aside" in note:
+                if ("stepped aside" in note or "moving aside" in note
+                        or "accepted PIBT request" in note):
                     self.deadlocks_broken += 1
                 self.decisions.append({
                     "sim_time": round(self.sim_time, 2),
@@ -1186,7 +1187,9 @@ class World:
             "deadlocks_broken": self.deadlocks_broken,
             "obstacles": len(self.obstacles),
             "safe_mode": sum(1 for r in robots if r.safe_mode),
-            **{f"task_{k}": v for k, v in task_stats.items()},
+            **{f"task_{k}": v for k, v in task_stats.items()
+               if k not in {"avg_task_time", "tasks_per_hour",
+                            "total_task_time"}},
             "blocked_known": len(set().union(*[r.blocked_cells(self.sim_time)
                                                for r in robots]) if robots else set()),
             "yields": sum(r.yields for r in robots),

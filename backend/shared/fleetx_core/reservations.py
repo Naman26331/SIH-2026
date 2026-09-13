@@ -183,15 +183,25 @@ class ReservationTable:
         return holder.robot_id
 
     def unavailable_intervals(self, robot_id: str, resource: ResourceKey,
-                              start: float, end: float) -> List[Tuple[float, float]]:
+                              start: float, end: float,
+                              ignore_future_from: Optional[set] = None
+                              ) -> List[Tuple[float, float]]:
         """Intervals where another robot owns ``resource``.
 
         SIPP asks this of the robot's local reservation copy. Splitting at all
         claim boundaries preserves deterministic priority ownership even when
         claims overlap; no global reservation service is consulted.
         """
+        ignored = set(ignore_future_from or ())
+        claims = [
+            claim for claim in self.claims_on(resource, start, end)
+            # A PIBT request grants use of an ancestor's FUTURE route while
+            # it waits. Physical occupancy is never grantable or ignorable.
+            if not (claim.robot_id in ignored
+                    and claim.priority < OCCUPANCY_PRIORITY)
+        ]
         boundaries = {start, end}
-        for claim in self.claims_on(resource, start, end):
+        for claim in claims:
             boundaries.add(max(start, claim.start))
             boundaries.add(min(end, claim.end))
         points = sorted(boundaries)
@@ -199,7 +209,8 @@ class ReservationTable:
         for left, right in zip(points, points[1:]):
             if right <= left:
                 continue
-            owner = self.owner(resource, left, right)
+            active = [claim for claim in claims if claim.overlaps(left, right)]
+            owner = min(active, key=lambda claim: claim.rank) if active else None
             if owner is None or owner.robot_id == robot_id:
                 continue
             if unavailable and abs(unavailable[-1][1] - left) < 1e-9:
