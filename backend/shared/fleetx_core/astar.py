@@ -32,6 +32,27 @@ from .reservations import ReservationTable, edge_key, node_key, target_key
 CostFn = Callable[[Cell, Cell], float]
 
 
+def stop_capable_step_time(distance: float, cruise_speed: float,
+                           acceleration: float, deceleration: float) -> float:
+    """Conservative travel time with enough distance to accelerate and stop.
+
+    Every reserved grid transition is treated as stop-capable. This is less
+    optimistic than distance/cruise-speed and prevents SIPP timestamps from
+    promising that physical wheels can clear a cell sooner than they can.
+    """
+    distance = max(0.0, distance)
+    speed = max(0.1, cruise_speed)
+    accel = max(0.1, acceleration)
+    brake = max(0.1, deceleration)
+    accelerate_distance = speed * speed / (2.0 * accel)
+    brake_distance = speed * speed / (2.0 * brake)
+    if accelerate_distance + brake_distance <= distance:
+        cruise_distance = distance - accelerate_distance - brake_distance
+        return speed / accel + cruise_distance / speed + speed / brake
+    peak = math.sqrt(2.0 * distance / (1.0 / accel + 1.0 / brake))
+    return peak / accel + peak / brake
+
+
 def uniform_cost(_from_cell: Cell, _to_cell: Cell) -> float:
     """Every step costs the same. The Phase 1 default."""
     return 1.0

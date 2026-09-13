@@ -34,7 +34,7 @@ from .reservations import (DEFAULT_LOOKAHEAD, OCCUPANCY_PRIORITY, Reservation,
 from .robot import Robot, RobotStatus
 from .tasks import (BID_WINDOW, Task, TaskBoard, TaskStatus, auction_winner,
                     bid_cost, bid_rank)
-from .world import (COLLISION_DISTANCE, GEOMETRY_SAFE_GAP, World, fleet_world,
+from .world import (COLLISION_DISTANCE, World, fleet_world,
                     phase1_world, phase2_world)
 
 __all__ = [
@@ -60,5 +60,4 @@ __all__ = [
     "BlockedMap", "Block", "within_range", "SENSOR_RANGE", "DEFAULT_TTL",
     "DEFAULT_HORIZON", "DEFAULT_CLEARANCE",
     "World", "phase1_world", "phase2_world", "fleet_world", "COLLISION_DISTANCE",
-    "GEOMETRY_SAFE_GAP",
 ]

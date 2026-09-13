@@ -8,7 +8,7 @@ shared/fleetx_core/ stays pure. Proper job assignment arrives in Phase 9
 import random
 from typing import Dict, List, Optional, Tuple
 
-from fleetx_core import Cell, RobotStatus, World
+from fleetx_core import Cell, RobotStatus, Task, TaskClaim, TaskStatus, World
 from fleetx_core.grid import CellKind
 
 # Where each robot wanders when nothing else is going on.
@@ -87,6 +87,7 @@ class Scenarios:
             "patrol": self._patrol,
             "head_on": self._head_on,
             "intersection": self._intersection,
+            "deadlock": self._deadlock,
             "stop": self._stop,
             "orders": self._orders,
         }.get(name)
@@ -172,6 +173,100 @@ class Scenarios:
         self._place("R2", Cell(21, 8), Cell(2, 8))
         self._place("R3", Cell(13, 0), Cell(13, 15))
         return "Intersection: all three robots converging on the junction at (13, 8)."
+
+    def _deadlock(self) -> str:
+        """The five-robot knot: two tasked pairs nose to nose in 1-wide
+        aisles, plus a fifth converging on a contested pickup.
+
+        R4 carries east while R5 collects west through the same row-4
+        corridor cells; R1 and R3 mirror it in row 8; R2 drives up from
+        the south for the D16 pickup R1 also wants. Static tasks and no
+        order stream, so the jam is repeatable: watch DEADLOCKED climb,
+        then JAMS BROKEN as PIBT backtracking clears each pair.
+        """
+        self.auto = False
+        self.orders = None
+        self.world.resume_all()
+        while len(self.world.robots) < 5:
+            self.world.add_robot_live()
+        self.world.reset_counters()
+        self._clear_the_floor()
+        self._place("R1", Cell(21, 8), None)
+        self._place("R2", Cell(25, 9), None)
+        self._place("R3", Cell(22, 8), None)
+        self._place("R4", Cell(21, 4), None)
+        self._place("R5", Cell(22, 4), None)
+        for rid, battery in (("R1", 34.0), ("R2", 87.0), ("R3", 33.0),
+                             ("R4", 52.0), ("R5", 53.0)):
+            robot = self.world.get(rid)
+            if robot is not None:
+                robot.battery = battery
+        now = self.world.sim_time
+        jobs = [
+            # (robot, pickup, dropoff, product, shelf, qty, carrying)
+            ("R4", Cell(23, 4), Cell(27, 2), "Router", "D13", 1, True),
+            ("R5", Cell(2, 5), Cell(0, 6), "Laptop", "A11", 1, False),
+            ("R1", Cell(25, 6), Cell(27, 6), "Charger", "D16", 1, False),
+            ("R3", Cell(2, 1), Cell(0, 2), "Printer", "A1", 2, False),
+            ("R2", Cell(25, 6), Cell(27, 10), "Charger", "D16", 1, False),
+        ]
+        for rid, pickup, dropoff, product, shelf, qty, carrying in jobs:
+            task = self.world.announce_task(
+                pickup, dropoff, product=product, shelf=shelf, quantity=qty)
+            self._hand_task(rid, task, carrying, now)
+        # Two more open jobs, like the live floor: everyone here already has
+        # work, so these sit waiting for bids.
+        self.world.announce_task(Cell(25, 6), Cell(27, 6), product="Charger",
+                                 shelf="D16", quantity=2)
+        self.world.announce_task(Cell(2, 5), Cell(0, 6), product="Laptop",
+                                 shelf="A11", quantity=2)
+        return ("Deadlock drill: R4/R5 nose to nose in row 4, R1/R3 nose to "
+                "nose in row 8, R2 closing on R1's D16 pickup. Watch the jam "
+                "form, then PIBT backtracking clear it.")
+
+    def _hand_task(self, robot_id: str, task, carrying: bool,
+                   now: float) -> None:
+        """Give a staged robot its job directly, exactly as if it had won the
+        auction for it.
+
+        The robot's own board copy is assigned first, so the CLAIM broadcast
+        that follows reads as a tie on every board -- including its own --
+        and never as a steal. Skipping the broadcast would leave the rest of
+        the fleet bidding on taken work.
+        """
+        robot = self.world.get(robot_id)
+        if robot is None:
+            return
+        mine = Task(
+            task_id=task.task_id,
+            pickup=task.pickup, dropoff=task.dropoff,
+            product=task.product, priority=task.priority,
+            shelf=task.shelf, quantity=task.quantity,
+            created_at=now, announced_at=now,
+            status=TaskStatus.ASSIGNED, flexible=task.flexible,
+        )
+        mine.assigned_robot = robot_id
+        mine.claimed_at = now
+        mine.winning_bid = 0.0
+        robot.board.add(mine)
+        robot._my_bids[task.task_id] = 0.0
+        task.assigned_robot = robot_id
+        task.status = TaskStatus.ASSIGNED
+        task.claimed_at = now
+        task.winning_bid = 0.0
+        robot._take_task(mine, now)
+        robot._publish(self.world.bus, TaskClaim(
+            robot_id=robot_id, timestamp=now, seq=robot.seq,
+            task_id=task.task_id, action="CLAIM", cost=0.0))
+        if carrying:
+            mine.status = TaskStatus.CARRYING
+            mine.picked_at = now
+            task.status = TaskStatus.CARRYING
+            task.picked_at = now
+            robot.set_goal(task.dropoff)
+            robot._publish(self.world.bus, TaskClaim(
+                robot_id=robot_id, timestamp=now, seq=robot.seq,
+                task_id=task.task_id, action="PICKED"))
 
     def _stop(self) -> str:
         """The emergency stop. Everything halts where it is.

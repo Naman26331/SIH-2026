@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Callable, Dict, Iterable, List, Optional
 
-from .astar import find_sipp_path
+from .astar import find_sipp_path, stop_capable_step_time
 from .conflicts import (DEFAULT_CLEARANCE, DEFAULT_HORIZON, Conflict, Plan,
                         build_plan, find_conflicts)
 from .deadlock import STUCK_SECONDS, WaitForGraph, Waiting, choose_victim
@@ -60,7 +60,6 @@ class RobotStatus(str, Enum):
 # Which way it is facing, purely so the dashboard can draw a nose on it.
 _HEADINGS = {(0, -1): "N", (1, 0): "E", (0, 1): "S", (-1, 0): "W"}
 
-
 def _heading(from_cell: Cell, to_cell: Cell) -> Optional[str]:
     return _HEADINGS.get((to_cell.x - from_cell.x, to_cell.y - from_cell.y))
 
@@ -72,6 +71,8 @@ class Robot:
     robot_id: str
     cell: Cell                      # the square it is on (or just left)
     speed: float = 2.5              # squares per second
+    acceleration: float = 6.0       # squares per second squared
+    deceleration: float = 8.0       # squares per second squared
     battery: float = 100.0          # percent
 
     goal: Optional[Cell] = None     # where it has been told to go
@@ -160,8 +161,21 @@ class Robot:
     _resume_at: float = 0.0
     _last_wait_report: Optional[tuple] = None
     _asked_at: Dict[str, float] = field(default_factory=dict)
-    _make_way_for: Optional[tuple] = None
-    _pending_ask: Optional[tuple] = None
+    _pibt_request: Optional[dict] = None
+    _pibt_outbox: List[tuple] = field(default_factory=list)
+    _pibt_rejected_until: Dict[str, float] = field(default_factory=dict)
+    # Jam-breaker throttle. SEPARATE from _asked_at on purpose: _asked_at is
+    # refreshed every 0.6s by PIBT retries in consider_reroute, so gating
+    # report_jam on it starved the breaker permanently -- cycles were seen
+    # but never acted on, and pairs sat nose to nose forever.
+    _jam_asked_at: Dict[str, float] = field(default_factory=dict)
+    # Sticky yield: who we moved aside for, and how long we keep clear.
+    # A blind timer resumes straight back into the same contest (break,
+    # resume, re-jam on repeat). Instead the yielder stays clear until the
+    # asker demonstrably passes, with a deadline so a misjudgement can
+    # never freeze a robot for good.
+    _yield_for: Optional[str] = None
+    _yield_until: float = 0.0
     _still_for: float = 0.0         # seconds spent going nowhere, see stalled_for
     _reversing: bool = False        # backing out of a segment it cannot finish
 
@@ -564,8 +578,12 @@ class Robot:
         robot already cautious about the network is MORE cautious near a
         person, never less.
         """
-        speed = self.speed * (self.SAFE_MODE_SPEED_FACTOR if self.safe_mode else 1.0)
-        return speed * self._person_speed_factor()
+        cruise = self.speed * (
+            self.SAFE_MODE_SPEED_FACTOR if self.safe_mode else 1.0)
+        cruise *= self._person_speed_factor()
+        dwell = stop_capable_step_time(
+            1.0, cruise, self.acceleration, self.deceleration)
+        return 1.0 / max(dwell, 1e-6)
 
     def _nearest_person(self, x: float, y: float) -> Optional[tuple]:
         """(distance, human_id) to the closest person we currently know
@@ -718,15 +736,16 @@ class Robot:
             ))
         self._pending_blocks.clear()
 
-        # 4b. Any PIBT request we were asked to pass along (backtracking).
-        if self._pending_ask is not None:
-            who, side, root, trail, priority = self._pending_ask
-            self._pending_ask = None
+        # 4b. PIBT replies and recursive requests. Reliable DDS carries each
+        # message; the state machine retries after a bounded timeout.
+        for action, who, side, request_id, root, trail, priority in self._pibt_outbox:
             self._publish(bus, YieldRequest(
                 robot_id=self.robot_id, timestamp=now, seq=self.seq,
                 target=who, resource=(side.x, side.y), reason="PIBT",
+                action=action, conflict_id=request_id,
                 priority=priority, root=root, trail=trail,
             ))
+        self._pibt_outbox.clear()
 
         # 5. "I am stuck behind X" -- the raw material for spotting a jam that
         #    will never clear itself. Sent when it changes, not constantly.
@@ -755,7 +774,7 @@ class Robot:
         """This robot's own bookings: which squares it will hold, and when."""
         return build_plan(
             self.robot_id, self.cell, self.path, self.node_etas(),
-            self.speed, horizon=horizon,
+            self.travel_speed(), horizon=horizon,
         )
 
     def neighbour_plans(self, now: float, horizon: float = DEFAULT_HORIZON) -> List[Plan]:
@@ -771,7 +790,7 @@ class Robot:
             plans.append(build_plan(
                 note.robot_id, Cell(note.cell[0], note.cell[1]),
                 nodes, note.node_etas,
-                note.velocity if note.velocity > 0 else self.speed,
+                note.velocity if note.velocity > 0 else self.travel_speed(),
                 horizon=horizon,
                 # its ETAs were true when it spoke, not when we heard it
                 time_offset=max(0.0, now - note.intent_sent_at),
@@ -1010,8 +1029,12 @@ class Robot:
         self._resume_at = 0.0
         self._last_wait_report = None
         self._asked_at.clear()
-        self._make_way_for = None
-        self._pending_ask = None
+        self._jam_asked_at.clear()
+        self._yield_for = None
+        self._yield_until = 0.0
+        self._pibt_request = None
+        self._pibt_outbox.clear()
+        self._pibt_rejected_until.clear()
         self._contact_since.clear()
         self.local_contacts = []
         self.safe_mode = False
@@ -1300,21 +1323,6 @@ class Robot:
             if self.status is RobotStatus.WAITING and self.path:
                 self.status = RobotStatus.MOVING
 
-    def geometry_brake(self, now: float, dt: float, other_id: str) -> None:
-        """Forced to a hard stop by World._enforce_geometry_gap (Phase 19) --
-        physically too close to another robot's ACTUAL position, regardless
-        of what square booking or PIBT negotiation decided.
-
-        The same kind of hard, unnegotiated stop _human_too_close() already
-        uses: no priority, no reasoning about who goes first, just "too
-        close -- stop." Whichever robot in the pair is mid-segment (at least
-        one always is, or they would not have been close enough to trigger
-        this) is left exactly where back_out_if_wedged() already knows how
-        to find it.
-        """
-        self.blocked_by = other_id
-        self._set_hold(True, now, dt, emergency=True)
-
     BACK_OUT_AFTER = 3.0        # wedged this long mid-segment, so reverse
 
     def back_out_if_wedged(self, now: float) -> Optional[str]:
@@ -1407,6 +1415,7 @@ class Robot:
                 "unknown", "obstacle", "unreserved"):
             other = self.fleet.get(peer)
             if other is not None:
+                rejected = self._pibt_rejected_until.get(peer, 0.0) > now
                 i_yield = yields_to(
                     self.priority, self.robot_id,
                     other.priority, other.robot_id)
@@ -1415,15 +1424,18 @@ class Robot:
                     self.last_decision = (
                         f"{self.robot_id} waits for PIBT request from {peer}")
                     return False
-                last = self._asked_at.get(peer, -99.0)
-                if now - last >= self.NEGOTIATION_RETRY:
-                    self._asked_at[peer] = now
-                    self.asked += 1
-                    self._ask_to_move(bus, now, peer, "PIBT")
-                self.status = RobotStatus.NEGOTIATING
-                self.last_decision = (
-                    f"{self.robot_id} PIBT priority passes through {peer}")
-                return False
+                if not rejected:
+                    last = self._asked_at.get(peer, -99.0)
+                    if now - last >= self.NEGOTIATION_RETRY:
+                        self._asked_at[peer] = now
+                        self.asked += 1
+                        self._ask_to_move(bus, now, peer, "PIBT")
+                    self.status = RobotStatus.NEGOTIATING
+                    self.last_decision = (
+                        f"{self.robot_id} PIBT priority passes through {peer}")
+                    return False
+                # Receiver exhausted its candidates. SIPP now tries a local
+                # detour; after cooldown, PIBT may negotiate again.
 
         if now < self._reroute_cooldown_until:
             return False
@@ -1561,6 +1573,7 @@ class Robot:
         if (self.task is not None or self.charger is not None
                 or self.halted or self.status is RobotStatus.FAILED
                 or self.safe_mode
+                or self._suspended_goal is not None
                 or self.status is RobotStatus.CHARGING):
             # Anything real to do beats a hunch, so forget the hunch. Clearing
             # it here as well as when it is taken matters: a robot that booked
@@ -2328,7 +2341,9 @@ class Robot:
     # seconds, which to anyone watching looks like the system has frozen.
     # Longer chains still get the full patience -- those often do clear.
     MUTUAL_STUCK_SECONDS = 1.0
-    ASIDE_PAUSE = 2.5           # stay out of the way this long before resuming
+    ASIDE_PAUSE = 2.5           # minimum stay before even thinking of resuming
+    YIELD_UNTIL = 12.0          # liveness cap on a sticky yield: resuming late
+                                # beats never resuming if our read is wrong
 
     def _ingest_jam_news(self, message, now: float) -> None:
         """File what we hear about who is stuck, and answer requests to move."""
@@ -2349,26 +2364,78 @@ class Robot:
                 self.waits._blocked_by.pop(message.robot_id, None)
 
         elif isinstance(message, YieldRequest) and message.target == self.robot_id:
-            # PIBT-only: every coordination message is a priority-inheritance
-            # REQUEST carrying (priority, root, trail). Legacy PROPOSE /
-            # YIELDING / ACK handshake packets from older peers are ignored;
-            # the REQUEST chain plus local backtracking replaces them.
-            if message.action != "REQUEST":
+            action = message.action
+            if action in ("ACCEPT", "REJECT"):
+                state = self._pibt_request
+                if (state is not None
+                        and state.get("child_id") == message.conflict_id
+                        and state.get("child") == message.robot_id):
+                    cell = tuple(message.resource)
+                    state["child_id"] = None
+                    state["child"] = None
+                    if action == "REJECT":
+                        state["tried"].add(cell)
+                    else:
+                        # A reply is a promise, not proof of motion. Remember
+                        # the branch and wait until local pose/sensor evidence
+                        # says it is physically clear.
+                        state["accepted"] = (message.robot_id, Cell(*cell))
+                elif action == "REJECT":
+                    self._pibt_rejected_until[message.robot_id] = (
+                        now + self.REROUTE_COOLDOWN)
                 return
+
+            if action != "REQUEST":
+                return                         # old protocol packet
             root = message.root or message.robot_id
             trail = list(message.trail) or [message.robot_id]
-            # Seeing ourselves means request chain looped. Refusing that
-            # edge is distributed PIBT backtracking, not central recovery.
-            if self.robot_id not in trail:
-                inherited = max(message.priority, self.priority)
-                self._pibt_priority = max(self._pibt_priority, inherited)
-                self._pibt_until = max(
-                    self._pibt_until, now + self.NEGOTIATION_LOCK)
-                self._pibt_root = root
-                self._make_way_for = (
-                    message.robot_id, Cell(*message.resource), now,
-                    root, trail + [self.robot_id], inherited,
-                )
+            request_id = message.conflict_id or (
+                f"{root}:{message.robot_id}:{message.resource[0]}:"
+                f"{message.resource[1]}:{message.seq}")
+            wanted = Cell(*message.resource)
+
+            # Loop or priority inversion: explicitly reject so the parent can
+            # backtrack to its next candidate instead of timing out silently.
+            should_yield = yields_to(
+                self.priority, self.robot_id,
+                message.priority, root)
+            if self.robot_id in trail or not should_yield:
+                self._queue_pibt(
+                    "REJECT", message.robot_id, wanted, request_id,
+                    root, trail, message.priority)
+                return
+
+            current = self._pibt_request
+            if current is not None and current["request_id"] == request_id:
+                current["asked_at"] = now       # reliable retry, same state
+                return
+            if current is not None and current["request_id"] != request_id:
+                incoming_wins = yields_to(
+                    current["priority"], current["root"],
+                    message.priority, root)
+                if not incoming_wins:
+                    self._queue_pibt(
+                        "REJECT", message.robot_id, wanted, request_id,
+                        root, trail, message.priority)
+                    return
+                self._queue_pibt(
+                    "REJECT", current["parent"], current["wanted"],
+                    current["request_id"], current["root"],
+                    current["trail"], current["priority"])
+
+            inherited = max(message.priority, self.priority)
+            self._pibt_priority = max(self._pibt_priority, inherited)
+            self._pibt_until = max(
+                self._pibt_until, now + self.NEGOTIATION_LOCK)
+            self._pibt_root = root
+            self._pibt_request = {
+                "parent": message.robot_id, "wanted": wanted,
+                "asked_at": now, "root": root,
+                "trail": trail + [self.robot_id],
+                "priority": inherited, "request_id": request_id,
+                "tried": set(), "child": None, "child_id": None,
+                "accepted": None,
+            }
 
     def report_jam(self, grid: Grid, bus, now: float) -> Optional[str]:
         """Have I been stuck so long that this will never clear itself?
@@ -2393,7 +2460,7 @@ class Robot:
         if stuck < patience:
             return None
 
-        last_asked = self._asked_at.get(blocker)
+        last_asked = self._jam_asked_at.get(blocker)
         if last_asked is not None and now - last_asked < self.ASK_COOLDOWN:
             return None
 
@@ -2416,19 +2483,26 @@ class Robot:
                                     info.since if info else 0.0))
             victim = choose_victim(members)
             if victim == self.robot_id:
-                # Our turn to give up. Step aside, remember where we were going.
-                if self.step_aside(grid, now, [], reason="cycle"):
+                # Our turn to give up. Step aside (or back up, if boxed in
+                # -- see step_aside), remember where we were going, and stay
+                # clear until the other side demonstrably passes.
+                if self.step_aside(grid, now, [], reason="cycle",
+                                   yield_for=blocker):
                     return (f"{self.robot_id} broke a deadlock "
                             f"({' -> '.join(cycle)}) by moving aside")
+                # Boxed in with nowhere to go at all: remember the contest so
+                # the sticky yield below keeps us trying instead of giving up.
+                self._yield_for = blocker
+                self._yield_until = now + self.YIELD_UNTIL
                 return None
-            self._asked_at[victim] = now
+            self._jam_asked_at[victim] = now
             self.asked += 1
             self._ask_to_move(bus, now, victim, "CYCLE")
             return (f"{self.robot_id} stuck in a loop "
                     f"({' -> '.join(cycle)}) - asked {victim} to move")
 
         if self.waits.is_parked(blocker):
-            self._asked_at[blocker] = now
+            self._jam_asked_at[blocker] = now
             self.asked += 1
             self._ask_to_move(bus, now, blocker, "PARKED")
             return f"{self.robot_id} asked {blocker} to move - it is parked in the way"
@@ -2439,50 +2513,88 @@ class Robot:
         if bus is None or not self.path:
             return
         wanted = self.path[0]
+        request_id = (f"{self._pibt_root or self.robot_id}:"
+                      f"{target}:{wanted.x}:{wanted.y}")
         self._publish(bus, YieldRequest(
             robot_id=self.robot_id, timestamp=now, seq=self.seq,
             target=target, resource=(wanted.x, wanted.y), reason=reason,
+            action="REQUEST", conflict_id=request_id,
             priority=self.priority, root=self._pibt_root or self.robot_id,
             trail=[self.robot_id],
         ))
 
+    def _queue_pibt(self, action: str, target: str, resource: Cell,
+                    request_id: str, root: str, trail: List[str],
+                    priority: int) -> None:
+        self._pibt_outbox.append((
+            action, target, resource, request_id, root,
+            list(trail), priority,
+        ))
+
     def answer_requests(self, grid: Grid, now: float) -> Optional[str]:
-        """Somebody asked us to move. Be a good neighbour about it."""
-        pending = getattr(self, "_make_way_for", None)
-        if pending is None:
+        """Advance one step of this peer's distributed PIBT state machine."""
+        state = self._pibt_request
+        if state is None:
             return None
-        asker, wanted, asked_at, root, trail, inherited = pending
-        self._make_way_for = None
-        if now - asked_at > 3.0:
-            return None                          # stale request, ignore
-        if self.step_aside(grid, now, [wanted], reason="asked"):
-            return (f"{self.robot_id} stepped aside for {asker} "
+        if now - state["asked_at"] > self.NEGOTIATION_LOCK:
+            self._queue_pibt(
+                "REJECT", state["parent"], state["wanted"],
+                state["request_id"], state["root"], state["trail"],
+                state["priority"])
+            self._pibt_request = None
+            return f"{self.robot_id} PIBT request expired; parent will backtrack"
+
+        asker, wanted = state["parent"], state["wanted"]
+        if self.step_aside(grid, now, [wanted], reason="PIBT",
+                           yield_for=asker):
+            self._queue_pibt(
+                "ACCEPT", asker, wanted, state["request_id"],
+                state["root"], state["trail"], state["priority"])
+            self._pibt_request = None
+            return (f"{self.robot_id} accepted PIBT request from {asker} "
                     f"-> ({self.goal.x}, {self.goal.y})")
 
-        # Boxed in: every way out has somebody in it. Refusing would leave the
-        # queue stuck for ever, so pass the request along to whoever is
-        # blocking US -- anyone except the robot that just asked.
-        forwarded = self._pass_the_request_along(
-            grid, now, asker, wanted, root, trail, inherited)
-        # Keep trying until downstream backtracking frees a candidate or this
-        # short request lease expires. No peer owns global recovery state.
-        self._make_way_for = pending
-        return forwarded
+        if state["child_id"] is not None:
+            return None                         # wait for ACCEPT / REJECT
+        accepted = state.get("accepted")
+        if accepted is not None:
+            child, side = accepted
+            if self._immediate_side_blocker(side, now) == child:
+                return None                     # accepted child still moving
+            state["accepted"] = None            # sensor/pose confirms clear
 
-    def _pass_the_request_along(self, grid: Grid, now: float, asker: str,
-                                wanted: Cell, root: str, trail: List[str],
-                                inherited: int) -> Optional[str]:
+        forwarded = self._pass_the_request_along(grid, now, state)
+        if forwarded is not None:
+            return forwarded
+
+        self._queue_pibt(
+            "REJECT", asker, wanted, state["request_id"], state["root"],
+            state["trail"], state["priority"])
+        self._pibt_request = None
+        return f"{self.robot_id} rejected PIBT request; no local candidate"
+
+    def _pass_the_request_along(self, grid: Grid, now: float,
+                                state: dict) -> Optional[str]:
+        asker, wanted = state["parent"], state["wanted"]
         for side in grid.neighbours(self.cell):
+            pair = (side.x, side.y)
+            if side == wanted or pair in state["tried"]:
+                continue
             who = self._immediate_side_blocker(side, now)
-            if who is None or who == asker or who in trail:
+            if who is None or who == "unknown":
                 continue
-            last = self._asked_at.get(who)
-            if last is not None and now - last < self.ASK_COOLDOWN:
+            if who == asker or who in state["trail"]:
+                state["tried"].add(pair)
                 continue
-            self._asked_at[who] = now
+            child_id = (f"{state['request_id']}/{self.robot_id}:"
+                        f"{who}:{side.x}:{side.y}")
+            state["child"] = who
+            state["child_id"] = child_id
             self.asked += 1
-            self._pending_ask = (who, side, root, list(trail), inherited)
-            return f"{self.robot_id} PIBT-backtracks locally through {who}"
+            self._queue_pibt(
+                "REQUEST", who, side, child_id, state["root"],
+                state["trail"], state["priority"])
+            return f"{self.robot_id} passed PIBT priority to {who}"
         return None
 
     def _immediate_side_blocker(self, side: Cell, now: float) -> Optional[str]:
@@ -2502,12 +2614,19 @@ class Robot:
         return None
 
     def step_aside(self, grid: Grid, now: float, avoid: List[Cell],
-                   reason: str = "asked") -> bool:
+                   reason: str = "asked",
+                   yield_for: Optional[str] = None) -> bool:
         """Shuffle out of the way, remembering where we were going.
 
         Remembering matters. Breaking a jam by wandering off and forgetting the
         job would just swap one problem for another.
+
+        A yield is still a normal SIPP route. It must never inject a square
+        directly into ``path`` or ignore a peer reservation: that would make
+        the deadlock solver itself capable of causing a collision.
         """
+        if self._progress > 0.0:
+            return False             # finish/recover the physical edge first
         blocked = set(avoid)
         blocked.update(self.known_occupied(now))
         if self.path:
@@ -2518,27 +2637,38 @@ class Robot:
             c for c in grid.neighbours(self.cell)
             if c not in blocked and self._immediate_side_blocker(c, now) is None
         ]
-        if not options:
-            return False
-
-        # Prefer somewhere out of the traffic: furthest from whoever we are
-        # getting out of the way of.
+        # Prefer somewhere out of the traffic, with deterministic coordinates
+        # as a final tie-break so peers cannot oscillate between equal choices.
         anchor = avoid[0] if avoid else (self.path[0] if self.path else self.cell)
-        options.sort(key=lambda c: -((c.x - anchor.x) ** 2 + (c.y - anchor.y) ** 2))
-        spot = options[0]
+        options.sort(key=lambda c: (
+            -((c.x - anchor.x) ** 2 + (c.y - anchor.y) ** 2), c.y, c.x))
+
+        spot = None
+        route = None
+        for candidate in options:
+            candidate_route = self.plan_path(
+                grid, self.cell, candidate, now, blocked=blocked)
+            if candidate_route is not None and len(candidate_route) > 1:
+                spot, route = candidate, candidate_route
+                break
+        if spot is None or route is None:
+            return False
 
         if self.goal is not None and self._suspended_goal is None:
             self._suspended_goal = self.goal
         self.forget_bookings_soft()
         self.set_goal(spot)
-        # This is an immediate one-cell escape already checked against local
-        # intent and reservations. Install it now; do not announce success and
-        # then let the next tick discover that no route exists.
-        self.path = [spot]
+        self.path = route[1:]
+        # reserve_ahead() runs later in the tick. Do not start driving before
+        # the newly planned yield route has actually been advertised.
+        self._set_hold(True, now, 0.0)
         self.status = RobotStatus.YIELDING
         self._reroute_at = now
         self._resume_at = now + self.ASIDE_PAUSE
         self.yields += 1
+        if yield_for is not None:
+            self._yield_for = yield_for
+            self._yield_until = now + self.YIELD_UNTIL
         return True
 
     def forget_bookings_soft(self) -> None:
@@ -2547,14 +2677,40 @@ class Robot:
             self.table.release(self.robot_id, key)
         self._claimed.clear()
 
-    def resume_after_yielding(self, now: float) -> Optional[str]:
-        """Once out of the way and the coast is clear, carry on with the job."""
+    def resume_after_yielding(self, grid, now: float) -> Optional[str]:
+        """Carry on with the job, but only once the coast is actually clear.
+
+        A blind timer resumes straight back into the same contest: break,
+        resume, re-jam on repeat, with the jam counter climbing and nothing
+        delivered. So resuming needs evidence, not elapsed time alone: the
+        peer we yielded for is gone from our notebook, has no goal left, is
+        further than two squares away, is no longer waiting on us -- or the
+        liveness deadline passed, in which case resuming late beats never
+        resuming. While the peer still contests, remain clear.
+        """
         if self._suspended_goal is None or self.goal is not None:
+            return None
+        # Taken on new work (or a charging trip) while yielding: the old
+        # goal is void. Drop it rather than yanking the robot back later.
+        if self.task is not None or self.charger is not None:
+            self._suspended_goal = None
+            self._yield_for = None
             return None
         if now < self._resume_at:
             return None
+        peer = self._yield_for
+        if peer is not None and now < self._yield_until:
+            note = self.fleet.get(peer) if self.fleet else None
+            if note is not None:
+                peer_cell = Cell(note.cell[0], note.cell[1])
+                near = (abs(peer_cell.x - self.cell.x)
+                        + abs(peer_cell.y - self.cell.y) <= 2)
+                blocked_on_me = self.waits.blocker_of(peer) == self.robot_id
+                if near or blocked_on_me:
+                    return None
         goal = self._suspended_goal
         self._suspended_goal = None
+        self._yield_for = None
         self.set_goal(goal)
         return f"{self.robot_id} back on the job -> ({goal.x}, {goal.y})"
 
@@ -2568,7 +2724,9 @@ class Robot:
 
     def percent_per_square(self) -> float:
         """What one square of driving costs in charge."""
-        return self.DRAIN_MOVING / max(self.speed, 0.1)
+        nominal_dwell = stop_capable_step_time(
+            1.0, self.speed, self.acceleration, self.deceleration)
+        return self.DRAIN_MOVING * nominal_dwell
 
     def charge_urgency(self) -> int:
         """How badly we want a charger, as a booking priority.

@@ -57,6 +57,8 @@ class FleetAgent(Node):
         self.declare_parameter("robot_id", "R1")
         self.declare_parameter("start_cell", [2, 8])
         self.declare_parameter("speed", 2.5)            # squares per second
+        self.declare_parameter("acceleration", 6.0)     # squares / second^2
+        self.declare_parameter("deceleration", 8.0)     # squares / second^2
         self.declare_parameter("drive_mode", "simple")  # "simple" or "nav2"
         self.declare_parameter("sensor_range", 3.0)     # squares
         self.declare_parameter("odom_topic", "odom")
@@ -78,9 +80,16 @@ class FleetAgent(Node):
         # ---- the brain -----------------------------------------------------
         self.grid = default_grid()
         start = p("start_cell").value
+        # Never advertise/reserve a faster traversal than the wheel controller
+        # can physically achieve. ``speed`` may further lower this ceiling.
+        physical_grid_speed = (
+            float(p("max_linear").value) / max(T.RESOLUTION, 1e-6))
         self.robot = Robot(robot_id=self.robot_id,
                            cell=Cell(int(start[0]), int(start[1])),
-                           speed=float(p("speed").value))
+                           speed=min(float(p("speed").value),
+                                     physical_grid_speed),
+                           acceleration=float(p("acceleration").value),
+                           deceleration=float(p("deceleration").value))
         self.bus = Ros2Bus(self, self.robot_id)
         self.bus.register(self.robot_id)
 
@@ -104,7 +113,9 @@ class FleetAgent(Node):
         self.yaw = 0.0
         self.seen_blocked: List[Cell] = []
         self.seen_clear: List[Cell] = []
+        self.seen_contacts: List[tuple] = []
         self._last_goal_sent: Optional[Cell] = None
+        self._wait_until: float = 0.0
         self._last_tick = self.now()
 
         self.create_timer(1.0 / BRAIN_HZ, self.think)
@@ -142,6 +153,7 @@ class FleetAgent(Node):
         block can be cleared early instead of waiting for its timer.
         """
         hits = set()
+        contacts = {}
         seen = set()
         angle = msg.angle_min
         for r in msg.ranges:
@@ -163,15 +175,22 @@ class FleetAgent(Node):
                 d += step
 
             if r <= self.sensor_range * T.RESOLUTION and r < msg.range_max:
-                cell = T.world_to_cell(self.world_x + math.cos(world_angle) * r,
-                                       self.world_y + math.sin(world_angle) * r)
+                hit_x = self.world_x + math.cos(world_angle) * r
+                hit_y = self.world_y + math.sin(world_angle) * r
+                cell = T.world_to_cell(hit_x, hit_y)
                 # Only report it if the map says that square should be free.
                 if self.grid.in_bounds(cell) and self.grid.is_walkable(cell):
                     if cell != self.robot.cell:
                         hits.add(cell)
+                        gx, gy = T.world_to_grid_xy(hit_x, hit_y)
+                        contacts[(cell.x, cell.y)] = (gx, gy, cell)
 
         self.seen_blocked = list(hits)
         self.seen_clear = [c for c in seen if c not in hits]
+        # A scan cannot reliably identify which return is a robot. Feeding all
+        # unexpected occupied cells to the anonymous local-contact reflex is
+        # conservative and keeps collision safety independent of DDS.
+        self.seen_contacts = list(contacts.values())
 
     def on_battery(self, msg: BatteryState) -> None:
         """Use physical battery percentage; ROS reports it from 0.0 to 1.0."""
@@ -190,9 +209,10 @@ class FleetAgent(Node):
         self._last_tick = now
 
         # 1. what our own sensors found, and tell the fleet about it
+        self.robot.sense_robots(self.seen_contacts, now)
         for note in self.robot.sense(self.seen_blocked, self.seen_clear, now):
             self.get_logger().info(note)
-        self.seen_blocked, self.seen_clear = [], []
+        self.seen_blocked, self.seen_clear, self.seen_contacts = [], [], []
 
         # 2. listen to everyone, and speak
         for note in self.robot.communicate(self.bus, now):
@@ -201,9 +221,11 @@ class FleetAgent(Node):
         # Same operational checks as World.tick(), using only this robot's
         # local state. Network loss slows/stops unsafe work, and physical
         # battery telemetry can trigger charging.
-        for note in (
-                self.robot.update_link_health(now),
-                self.robot.manage_battery(self.grid, self.bus, now)):
+        for operation in (
+                self.robot.update_link_health,
+                lambda current: self.robot.manage_battery(
+                    self.grid, self.bus, current)):
+            note = operation(now)
             if note:
                 self.get_logger().info(note)
 
@@ -225,12 +247,15 @@ class FleetAgent(Node):
             self.get_logger().info(self.robot.last_decision)
 
         # 5. jams that will not clear themselves
-        for note in (self.robot.answer_requests(self.grid, now),
-                     self.robot.resume_after_yielding(now),
-                     self.robot.report_jam(self.grid, self.bus, now),
-                     self.robot.back_out_if_wedged(now)):
-            if note:
-                self.get_logger().info(note)
+        note = self.robot.answer_requests(self.grid, now)
+        if note is None:
+            note = self.robot.resume_after_yielding(self.grid, now)
+        if note is None:
+            note = self.robot.report_jam(self.grid, self.bus, now)
+        if note is None:
+            note = self.robot.back_out_if_wedged(now)
+        if note:
+            self.get_logger().info(note)
 
         # 6. NOTE: advance() is deliberately NOT called. That is the
         #    simulator's pretend driving. Here the wheels do it, and odometry
@@ -242,10 +267,21 @@ class FleetAgent(Node):
     def drive(self) -> None:
         """Send the robot at the next square on its route -- or stop it dead."""
         if self.robot.hold or not self.robot.path:
+            self._wait_until = 0.0
             self.stop()
             return
 
         target = self.robot.path[0]
+        if target == self.robot.cell:
+            now = self.now()
+            if self._wait_until <= 0.0:
+                self._wait_until = now + 1.0 / max(self.robot.travel_speed(), 0.1)
+            self.stop()
+            if now >= self._wait_until:
+                self.robot.path.pop(0)
+                self._wait_until = 0.0
+            return
+        self._wait_until = 0.0
         if self.drive_mode == "nav2":
             self.send_nav2_goal(target)
         else:

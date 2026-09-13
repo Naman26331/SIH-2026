@@ -236,9 +236,9 @@ class YieldRequest:
     asks the blocking peer to move. The receiver inherits that priority and
     either steps aside or recursively forwards it (backtracking via trail).
 
-    Only ``REQUEST`` is sent by the current core. ``action`` / ``conflict_id``
-    / ``winner`` remain on the wire solely so older peers' PROPOSE/YIELDING/ACK
-    packets still parse -- they are ignored, never acted on.
+    ``REQUEST`` recursively pushes a lower-priority peer. ``ACCEPT`` unwinds
+    the chain; ``REJECT`` makes the parent try its next candidate. Every peer
+    owns only its local request state.
     """
 
     robot_id: str                    # who is asking
@@ -247,9 +247,9 @@ class YieldRequest:
     target: str                      # who is being asked to move
     resource: Tuple[int, int]        # the square wanted
     reason: str                      # PARKED or CYCLE
-    action: str = "REQUEST"          # REQUEST, PROPOSE, YIELDING or ACK
-    conflict_id: str = ""            # stable id for one pairwise conflict
-    winner: str = ""                 # elected robot that keeps its route
+    action: str = "REQUEST"          # REQUEST, ACCEPT or REJECT
+    conflict_id: str = ""            # request id used while unwinding chain
+    winner: str = ""                 # legacy wire field; ignored
     priority: int = 0                 # inherited root priority for request chain
     root: str = ""                    # robot that started local chain
     trail: List[str] = field(default_factory=list)  # loop detection

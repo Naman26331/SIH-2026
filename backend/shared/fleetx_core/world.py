@@ -31,22 +31,6 @@ from .robot import Robot, RobotStatus
 # their bodies overlap on screen.
 COLLISION_DISTANCE = 0.7
 
-# Phase 19: the finer, continuous-space backstop UNDER square booking.
-# Booking only reasons about which NODE or EDGE a robot holds -- it says
-# nothing about the open floor near a shared corner, where two robots each
-# transiting a DIFFERENT edge that happens to meet at the same node can swing
-# closer to each other than either edge or node reservation alone would ever
-# catch, since neither is entering the other's booked resource. On a grid
-# where robots only ever move axis-aligned, two robots resting exactly on
-# grid points are always at least 1.0 squares apart -- anything closer than
-# that can only happen mid-transit. 0.9 sits strictly inside that gap: never
-# crossed in ordinary operation (so this stays invisible unless something
-# else already let two robots get closer than normal), comfortably above
-# COLLISION_DISTANCE (so it acts as an early brake, not a bystander to the
-# crash itself), and checked against GROUND TRUTH position, never a message
-# -- this has to keep working even with no radio at all.
-GEOMETRY_SAFE_GAP = 0.9
-
 # How many recent crashes to remember for the dashboard's event feed.
 _MAX_EVENTS = 40
 
@@ -153,12 +137,6 @@ class World:
         self._event_id: int = 0
 
         # Phase 19: which pairs the geometry backstop currently has braked.
-        # Same one-count-per-episode idea as self._touching, so a report can
-        # say honestly how many times this backup layer actually had to act,
-        # not how many ticks it happened to still be holding two robots apart.
-        self._geometry_close: set = set()
-        self.geometry_interventions: int = 0
-
     # --------------------------------------------------------------- fleet
 
     def add_robot(self, robot: Robot) -> Robot:
@@ -350,7 +328,8 @@ class World:
         for robot in self.robots.values():
             note = robot.answer_requests(self.grid, self.sim_time)
             if note is None:
-                note = robot.resume_after_yielding(self.sim_time)
+                note = robot.resume_after_yielding(
+                    self.grid, self.sim_time)
             if note is None:
                 note = robot.report_jam(self.grid, self.bus, self.sim_time)
             if note:
@@ -366,11 +345,6 @@ class World:
                 del self.decisions[:-20]
 
         self._watch_for_jams()
-        # Phase 19: the finer backstop, UNDER square booking itself --
-        # ground truth, never a message, so it holds even with the radio
-        # dead.
-        self._enforce_geometry_gap(self.sim_time, dt)
-
         # Remember where everyone was, so we can spot two robots swapping places.
         was_at: Dict[str, Cell] = {rid: r.cell for rid, r in self.robots.items()}
         human_was_at: Dict[str, Cell] = {hid: h.cell for hid, h in self.humans.items()}
@@ -978,49 +952,6 @@ class World:
     def stuck_robots(self) -> List[str]:
         return sorted(self._deadlocked)
 
-    # ------------------------------------------------- geometry (Phase 19)
-
-    def _enforce_geometry_gap(self, now: float, dt: float) -> None:
-        """The finer check for the space BETWEEN squares.
-
-        Square booking only reasons about which node or edge a robot holds.
-        It has nothing to say about the open floor near a shared corner,
-        where two robots each transiting a DIFFERENT edge that meets at the
-        same node can swing closer to each other than either edge or node
-        reservation alone would ever catch -- neither is entering the
-        other's booked resource, so nothing upstream has any reason to stop
-        them. This runs UNDER all of that, on every robot's actual (x, y),
-        never a message, so it holds even with the radio dead.
-
-        Deliberately as dumb as the person-proximity hard stop it mirrors: no
-        priority, no negotiation, just "too close -- stop." Untangling it is
-        left to the SAME recovery machinery that already untangles any other
-        emergency hold -- back_out_if_wedged() reverses whichever robot is
-        physically wedged mid-square, which is always at least one side of
-        any pair this catches, since two robots resting exactly on grid
-        points are never closer than 1.0 squares apart to begin with.
-        """
-        robots = self.physical_robots
-        close_now = set()
-        for i in range(len(robots)):
-            for j in range(i + 1, len(robots)):
-                a, b = robots[i], robots[j]
-                if (a.status is RobotStatus.FAILED
-                        and b.status is RobotStatus.FAILED):
-                    continue
-                gap_x, gap_y = a.x - b.x, a.y - b.y
-                if gap_x * gap_x + gap_y * gap_y >= GEOMETRY_SAFE_GAP ** 2:
-                    continue
-                pair = frozenset((a.robot_id, b.robot_id))
-                close_now.add(pair)
-                if pair not in self._geometry_close:
-                    self.geometry_interventions += 1
-                if a.status is not RobotStatus.FAILED:
-                    a.geometry_brake(now, dt, b.robot_id)
-                if b.status is not RobotStatus.FAILED:
-                    b.geometry_brake(now, dt, a.robot_id)
-        self._geometry_close = close_now
-
     # ----------------------------------------------------------- collisions
 
     def _detect_collisions(self, was_at: Dict[str, Cell],
@@ -1170,8 +1101,6 @@ class World:
         self.collision_events.clear()
         self._touching.clear()
         self._event_id = 0
-        self.geometry_interventions = 0
-        self._geometry_close.clear()
         self._warned.clear()
         self.conflicts_raised = 0
         self.collisions_predicted = 0
@@ -1234,7 +1163,6 @@ class World:
             "blocked": blocked,
             "charging": charging,
             "collisions": self.collisions,
-            "geometry_interventions": self.geometry_interventions,
             "tasks_completed": task_stats["done"],
             "total_distance": round(distance, 1),
             "avg_battery": round(battery, 1),
@@ -1276,7 +1204,7 @@ class World:
         return {
             "sim_time": round(self.sim_time, 2),
             "ticks": self.ticks,
-            "planner": "SIPP",
+            "planner": "acceleration-aware SIPP",
             "coordination_algorithm": "PIBT",
             "architecture": "DECENTRALIZED_P2P",
             # The map draws each robot's planned route as a short dotted line;
