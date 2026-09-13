@@ -179,6 +179,8 @@ class Robot:
     _asked_at: Dict[str, float] = field(default_factory=dict)
     _make_way_for: Optional[tuple] = None
     _pending_ask: Optional[tuple] = None
+    _pending_negotiations: List[tuple] = field(default_factory=list)
+    _negotiations: Dict[str, dict] = field(default_factory=dict)
     _saw_rng: object = None         # backoff randomness, seeded per robot
     _still_for: float = 0.0         # seconds spent going nowhere, see stalled_for
     _reversing: bool = False        # backing out of a segment it cannot finish
@@ -776,6 +778,17 @@ class Robot:
                 target=who, resource=(side.x, side.y), reason="BOXED_IN",
             ))
 
+        # Pairwise conflict handshake. The elected loser says YIELDING; the
+        # winner ACKs. Both keep the same short-lived lock, so a long wait can
+        # never make the winner independently reroute too.
+        for action, target, resource, conflict_id, winner in self._pending_negotiations:
+            self._publish(bus, YieldRequest(
+                robot_id=self.robot_id, timestamp=now, seq=self.seq,
+                target=target, resource=resource, reason="CONFLICT",
+                action=action, conflict_id=conflict_id, winner=winner,
+            ))
+        self._pending_negotiations.clear()
+
         # 5. "I am stuck behind X" -- the raw material for spotting a jam that
         #    will never clear itself. Sent when it changes, not constantly.
         report = (self.blocked_by, self.current_velocity() > 0.0)
@@ -1183,6 +1196,8 @@ class Robot:
         self._asked_at.clear()
         self._make_way_for = None
         self._pending_ask = None
+        self._pending_negotiations.clear()
+        self._negotiations.clear()
         self._contact_since.clear()
         self.local_contacts = []
         self.safe_mode = False
@@ -1213,6 +1228,8 @@ class Robot:
         self._charge_slot = None
         self._charge_wanted = False
         self._charge_checked_at = -99.0
+        self._pending_negotiations.clear()
+        self._negotiations.clear()
 
     def _broadcast_reservation(self, bus, now: float, action: str, res: Reservation) -> None:
         if bus is None:
@@ -1537,6 +1554,8 @@ class Robot:
     PATIENCE = 1.5              # wait this long before even considering a detour
     REROUTE_COOLDOWN = 2.5      # do not keep re-deciding every tick
     REROUTE_SHOW = 0.8          # how long the REROUTING label stays up
+    NEGOTIATION_LOCK = 5.0      # stops both robots changing their mind
+    NEGOTIATION_RETRY = 0.6     # tolerate a dropped best-effort packet
     DETOUR_SLACK = 4            # squares of detour we accept for free
     DETOUR_FACTOR = 2.5         # ...plus this multiple of what is left
 
@@ -1552,7 +1571,7 @@ class Robot:
             task_priority=self.task_priority,
         ))
 
-    def consider_reroute(self, grid: Grid, now: float) -> bool:
+    def consider_reroute(self, grid: Grid, now: float, bus=None) -> bool:
         """Held up: wait it out, or take the long way round?
 
         04_DECENTRALIZED_FLEET_PROTOCOL section 5:
@@ -1568,25 +1587,58 @@ class Robot:
             return False
         if self.waited_for(now) < self.PATIENCE:
             return False                       # be patient first
+        # A named peer can negotiate. Both calculate the same winner from the
+        # same priority rule; only the loser may replan. The old "desperate"
+        # escape hatch bypassed this rule and made both robots detour.
+        peer = self.blocked_by
+        if peer and not peer.startswith("person:") and peer not in (
+                "unknown", "obstacle", "unreserved"):
+            other = self.fleet.get(peer)
+            if other is not None:
+                resource = self.path[0]
+                conflict_id = self._conflict_id(peer)
+                state = self._negotiations.get(conflict_id)
+                if state is None or state["expires"] <= now:
+                    i_yield = yields_to(
+                        self.priority, self.robot_id,
+                        other.priority, other.robot_id)
+                    winner = peer if i_yield else self.robot_id
+                    state = {
+                        "peer": peer, "winner": winner, "expires": 0.0,
+                        "last_sent": -99.0, "state": "NEW",
+                    }
+                    self._negotiations[conflict_id] = state
+                else:
+                    # Freeze the election for the lock's lifetime. Fresh
+                    # priority updates cannot make both sides swap roles.
+                    winner = str(state["winner"])
+                    i_yield = winner != self.robot_id
+                state["expires"] = now + self.NEGOTIATION_LOCK
+
+                if now - state["last_sent"] >= self.NEGOTIATION_RETRY:
+                    action = "YIELDING" if i_yield else "PROPOSE"
+                    self._send_negotiation(
+                        bus, now, action, peer, resource, conflict_id, winner)
+                    state["last_sent"] = now
+                    if state["state"] != "ACK":
+                        state["state"] = action
+
+                if not i_yield:
+                    self.status = RobotStatus.NEGOTIATING
+                    self.last_decision = (
+                        f"{self.robot_id} won {conflict_id}; {peer} yields"
+                    )
+                    return False
+
+                self.status = RobotStatus.YIELDING
+                if state["state"] != "ACK":
+                    self.last_decision = (
+                        f"{self.robot_id} waits for {peer} ACK before rerouting"
+                    )
+                    return False
+
         if now < self._reroute_cooldown_until:
             return False
-
-        # Only the robot that LOSES the argument should go around. Without
-        # this, both of them politely detour, meet again, detour again, and
-        # dance around each other indefinitely -- each covering a lot of ground
-        # and neither getting to where it was going.
-        #
-        # A robot stuck far longer than normal tries anyway: better an
-        # unnecessary detour than sitting there for ever.
-        desperate = self.waited_for(now) >= self.PATIENCE * 3
-        if not desperate and self.blocked_by:
-            other = self.fleet.get(self.blocked_by)
-            if other is not None and not yields_to(
-                    self.priority, self.robot_id, other.priority, other.robot_id):
-                self.last_decision = (
-                    f"{self.robot_id} holds its line - {self.blocked_by} should go around"
-                )
-                return False
 
         self._reroute_cooldown_until = now + self.REROUTE_COOLDOWN
 
@@ -1664,6 +1716,23 @@ class Robot:
         # reserve_ahead claims the new route before it moves.
         self.waiting_since = None
         return True
+
+    def _conflict_id(self, peer: str) -> str:
+        """Stable pair id, even if each robot names a different next square."""
+        first, second = sorted((self.robot_id, peer))
+        return f"{first}:{second}"
+
+    def _send_negotiation(self, bus, now: float, action: str, target: str,
+                          resource: Cell, conflict_id: str, winner: str) -> None:
+        payload = (action, target, (resource.x, resource.y), conflict_id, winner)
+        if bus is None:
+            self._pending_negotiations.append(payload)
+            return
+        self._publish(bus, YieldRequest(
+            robot_id=self.robot_id, timestamp=now, seq=self.seq,
+            target=target, resource=(resource.x, resource.y), reason="CONFLICT",
+            action=action, conflict_id=conflict_id, winner=winner,
+        ))
 
     # ----------------------------- getting out of the way when idle
 
@@ -2560,7 +2629,53 @@ class Robot:
                 self.waits._blocked_by.pop(message.robot_id, None)
 
         elif isinstance(message, YieldRequest) and message.target == self.robot_id:
-            self._make_way_for = (message.robot_id, Cell(*message.resource), now)
+            if message.action == "REQUEST":
+                self._make_way_for = (message.robot_id, Cell(*message.resource), now)
+            else:
+                self._ingest_negotiation(message, now)
+
+    def _ingest_negotiation(self, message: YieldRequest, now: float) -> None:
+        """Apply one authenticated pairwise conflict handshake message."""
+        if message.action not in ("PROPOSE", "YIELDING", "ACK"):
+            return
+        if not message.conflict_id or not message.winner:
+            return
+
+        peer = message.robot_id
+        state = self._negotiations.setdefault(message.conflict_id, {
+            "peer": peer, "winner": message.winner, "expires": 0.0,
+            "last_sent": -99.0, "state": "NEW",
+        })
+
+        # Priority snapshots can briefly disagree. If both claim to be winner,
+        # the stable robot id breaks the disagreement identically at both ends.
+        if state["winner"] != message.winner:
+            elected = min(str(state["winner"]), message.winner)
+            state["winner"] = elected
+            if elected != message.winner:
+                return
+        state.update({
+            "peer": peer, "winner": message.winner,
+            "expires": now + self.NEGOTIATION_LOCK,
+            "state": message.action,
+        })
+        if message.action == "PROPOSE" and message.winner == peer:
+            # We are the designated loser. Confirm it; only we may replan.
+            self.status = RobotStatus.YIELDING
+            self._pending_negotiations.append((
+                "YIELDING", peer, message.resource,
+                message.conflict_id, message.winner,
+            ))
+        elif message.action == "YIELDING" and message.winner == self.robot_id:
+            # The loser accepted. ACK without overriding physical safety: the
+            # normal clearance check starts us once the square is truly clear.
+            self._pending_negotiations.append((
+                "ACK", peer, message.resource,
+                message.conflict_id, message.winner,
+            ))
+            self.last_decision = f"{self.robot_id} ACKed {peer} yielding"
+        elif message.action == "ACK" and message.winner == peer:
+            self.status = RobotStatus.YIELDING
 
     def report_jam(self, grid: Grid, bus, now: float) -> Optional[str]:
         """Have I been stuck so long that this will never clear itself?

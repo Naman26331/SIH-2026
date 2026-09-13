@@ -253,6 +253,9 @@ class YieldRequest:
     target: str                      # who is being asked to move
     resource: Tuple[int, int]        # the square wanted
     reason: str                      # PARKED or CYCLE
+    action: str = "REQUEST"          # REQUEST, PROPOSE, YIELDING or ACK
+    conflict_id: str = ""            # stable id for one pairwise conflict
+    winner: str = ""                 # elected robot that keeps its route
 
     type: str = field(default=MessageType.YIELD_REQUEST.value, init=False)
 
@@ -263,6 +266,8 @@ class YieldRequest:
             "target": self.target,
             "resource": [self.resource[0], self.resource[1]],
             "reason": self.reason,
+            "action": self.action, "conflict_id": self.conflict_id,
+            "winner": self.winner,
         }
 
 
@@ -512,6 +517,9 @@ def from_dict(data: Dict[str, Any]):
             robot_id=data["robot_id"], timestamp=data["timestamp"], seq=data["seq"],
             target=data["target"], resource=tuple(data["resource"]),
             reason=data.get("reason", "PARKED"),
+            action=data.get("action", "REQUEST"),
+            conflict_id=data.get("conflict_id", ""),
+            winner=data.get("winner", ""),
         )
     if kind == MessageType.BLOCKED_AISLE.value:
         return BlockedAisle(

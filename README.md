@@ -77,7 +77,7 @@ frontend/
 └── run.py               frontend server and backend proxy
 ```
 
-Data path: `ROS 2/DDS → backend gateway → JSON/SSE API → laptop dashboard`.
+Data path: `ROS 2/DDS → backend gateway → WebSocket → laptop dashboard`.
 Backend never serves frontend files. Frontend never imports ROS code.
 
 ## Run

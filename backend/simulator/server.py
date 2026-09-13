@@ -1,18 +1,21 @@
 """FLEET-X simulation backend API.
 
-No dashboard files are served here. Frontend calls the JSON/SSE API.
+No dashboard files are served here. Frontend calls JSON/WebSocket APIs.
 
 Uses only what ships inside Python: http.server, threading, json.
 No pip install. No npm install.
 
 Three things it serves:
   GET  /api/map       the warehouse map (sent once, it never changes)
-  GET  /api/stream    one full state, then compact live deltas
+  GET  /api/ws        WebSocket: one full state, then compact live deltas
   POST /api/goal      "robot R1, go to square (x, y)"
 """
 
+import base64
+import hashlib
 import json
 import os
+import struct
 import sys
 import threading
 import time
@@ -27,7 +30,6 @@ if _SHARED not in sys.path:
     sys.path.insert(0, _SHARED)
 
 from fleetx_core import Cell, World, phase1_world, phase2_world   # noqa: E402
-from comparison import Comparison   # noqa: E402
 from scenarios import Scenarios   # noqa: E402
 
 # A stamp for "which version of the code is this?".
@@ -73,7 +75,8 @@ _KEYED_LISTS = {
     "neighbours": "robot_id",
 }
 _PANEL_KEYS = {
-    "tasks", "messages", "decisions", "wait_graph", "stuck", "reslotting",
+    "views", "tasks", "messages", "decisions", "wait_graph", "stuck",
+    "reslotting",
 }
 _SLOW_KEYS = {
     "kpis", "bus", "demand", "build", "server_build", "scenario",
@@ -159,60 +162,47 @@ def _at_rate(current: dict, sent: dict, include: set) -> dict:
     return projected
 
 
-class ComparisonRunner:
-    """Runs BOTH fleets forward on their own thread, in lockstep.
+_ROBOT_WIRE_FIELDS = {
+    "robot_id", "halted", "charging", "health_score", "health_band",
+    "health_reasons", "near_person", "staging", "staging_why", "charger",
+    "cell", "x", "y", "heading", "status", "battery", "goal", "path",
+    "steps", "priority", "messages_sent", "blocked_by", "reroutes", "task",
+    "tasks_done", "waiting",
+}
+_NEIGHBOUR_WIRE_FIELDS = {
+    "robot_id", "x", "y", "planned_nodes", "node_etas", "age", "stale",
+    "missed",
+}
+_TASK_WIRE_FIELDS = {
+    "task_id", "pickup", "dropoff", "product", "shelf", "quantity",
+    "status", "assigned_robot", "reassignments",
+}
 
-    Completely separate from the single-fleet Simulation above, so the ordinary
-    dashboard keeps working exactly as it did whatever this does.
-    """
 
-    def __init__(self):
-        self.comparison = Comparison(robots=5, every=2.5, seed=1)
-        self.lock = threading.Lock()
-        self._stop = threading.Event()
-        self._thread: Optional[threading.Thread] = None
-
-    def start(self) -> None:
-        self._thread = threading.Thread(target=self._run, name="compare", daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop.set()
-
-    def _run(self) -> None:
-        dt = 1.0 / TICK_HZ
-        next_tick = time.perf_counter()
-        while not self._stop.is_set():
-            with self.lock:
-                # The speed control just does more steps per real second. The
-                # clock on screen is simulated time either way, so nothing is
-                # being fudged -- it is the same run, watched faster.
-                for _ in range(self.comparison.speed):
-                    self.comparison.tick(dt)
-            next_tick += dt
-            sleep_for = next_tick - time.perf_counter()
-            if sleep_for > 0:
-                time.sleep(sleep_for)
-            else:
-                next_tick = time.perf_counter()
-
-    def snapshot(self) -> dict:
-        with self.lock:
-            return self.comparison.snapshot()
-
-    def command(self, action: str, **kwargs) -> dict:
-        with self.lock:
-            c = self.comparison
-            if action == "start":
-                return {"ok": True, "message": c.start()}
-            if action == "pause":
-                return {"ok": True, "message": c.pause()}
-            if action == "reset":
-                msg = c.reset(robots=kwargs.get("robots"), every=kwargs.get("every"))
-                return {"ok": True, "message": msg}
-            if action == "speed":
-                return {"ok": True, "message": c.set_speed(int(kwargs.get("speed", 1)))}
-            return {"ok": False, "message": f"No such action: {action}"}
+def _dashboard_state(snapshot: dict) -> dict:
+    """Remove backend diagnostics that dashboard JavaScript never reads."""
+    state = dict(snapshot)
+    state.pop("ticks", None)
+    state.pop("sim_time", None)
+    state["robots"] = [
+        {key: value for key, value in row.items() if key in _ROBOT_WIRE_FIELDS}
+        for row in snapshot.get("robots", [])
+    ]
+    state["tasks"] = [
+        {key: value for key, value in row.items() if key in _TASK_WIRE_FIELDS}
+        for row in snapshot.get("tasks", [])
+    ]
+    views = {}
+    for robot_id, view in snapshot.get("views", {}).items():
+        compact = dict(view)
+        compact["neighbours"] = [
+            {key: value for key, value in row.items()
+             if key in _NEIGHBOUR_WIRE_FIELDS}
+            for row in view.get("neighbours", [])
+        ]
+        views[robot_id] = compact
+    state["views"] = views
+    return state
 
 
 class Simulation:
@@ -477,7 +467,6 @@ class Handler(BaseHTTPRequestHandler):
     """Answers the browser. Held on the server as `sim`."""
 
     sim: Simulation = None          # type: ignore[assignment]
-    compare: ComparisonRunner = None    # type: ignore[assignment]
     protocol_version = "HTTP/1.1"
 
     # Keep the terminal quiet -- otherwise every frame prints a line.
@@ -490,20 +479,12 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/health":
             self._send_json({"ok": True, "service": "fleet-x-backend",
                              "mode": self.sim.mode})
-        elif self.path == "/api/compare/stream":
-            if self.compare is None:
-                self._send_json({"ok": False, "message": "Comparison simulator disabled in ROS 2 mode."},
-                                status=409)
-            else:
-                self._send_stream(self.compare.snapshot, deltas=False,
-                                  hz=TICK_HZ)
         elif self.path == "/api/map":
             self._send_json(self.sim.map_data())
         elif self.path == "/api/state":
             self._send_json(self.sim.snapshot())
-        elif self.path == "/api/stream":
-            self._send_stream(self.sim.snapshot, deltas=True,
-                              hz=STREAM_HZ)
+        elif self.path == "/api/ws":
+            self._send_websocket(self.sim.snapshot)
         else:
             self._send_json({"error": "not found"}, status=404)
 
@@ -512,7 +493,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path not in ("/api/goal", "/api/scenario", "/api/reset",
                              "/api/silence", "/api/network", "/api/obstacle",
-                             "/api/power", "/api/compare", "/api/cut",
+                             "/api/power", "/api/cut",
                              "/api/fleet", "/api/rate", "/api/focus",
                              "/api/battery", "/api/attack", "/api/human"):
             self._send_json({"error": "not found"}, status=404)
@@ -521,13 +502,7 @@ class Handler(BaseHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length) or b"{}")
 
-            if self.path == "/api/compare":
-                result = (self.compare.command(
-                    body.get("action", "start"),
-                    robots=body.get("robots"), every=body.get("every"),
-                    speed=body.get("speed", 1)) if self.compare is not None
-                    else {"ok": False, "message": "Comparison simulator disabled in ROS 2 mode."})
-            elif self.path == "/api/goal":
+            if self.path == "/api/goal":
                 result = self.sim.set_goal(
                     body.get("robot_id", "R1"), body["x"], body["y"]
                 )
@@ -597,62 +572,62 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_stream(self, source, *, deltas: bool, hz: float):
-        """SSE stream: full bootstrap, then entity-level merge patches."""
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-store")
-        self.send_header("Connection", "keep-alive")
+    def _state_updates(self, source):
+        """Yield WebSocket bootstrap plus rate-limited deltas."""
+        sent = _dashboard_state(_stream_snapshot(source))
+        yield {"stream": "full", "state": sent}
+
+        next_panel = time.perf_counter() + 1.0 / PANEL_HZ
+        next_slow = time.perf_counter() + 1.0 / SLOW_HZ
+        while True:
+            time.sleep(1.0 / STREAM_HZ)
+            current = _dashboard_state(_stream_snapshot(source))
+            now = time.perf_counter()
+            held = set()
+            if now < next_panel:
+                held.update(_PANEL_KEYS)
+            else:
+                next_panel = now + 1.0 / PANEL_HZ
+            if now < next_slow:
+                held.update(_SLOW_KEYS)
+            else:
+                next_slow = now + 1.0 / SLOW_HZ
+            projected = _at_rate(current, sent, held)
+            patch = _delta(sent, projected)
+            if patch is _NO_CHANGE:
+                continue
+            sent = projected
+            yield {"stream": "delta", "patch": patch}
+
+    def _send_websocket(self, source) -> None:
+        """Server-to-browser WebSocket. Commands remain ordinary HTTP POSTs."""
+        key = self.headers.get("Sec-WebSocket-Key")
+        if (self.headers.get("Upgrade", "").lower() != "websocket" or not key):
+            self._send_json({"error": "WebSocket upgrade required"}, status=426)
+            return
+        accept = base64.b64encode(hashlib.sha1(
+            (key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode("ascii")
+        ).digest()).decode("ascii")
+        self.send_response(101, "Switching Protocols")
+        self.send_header("Upgrade", "websocket")
+        self.send_header("Connection", "Upgrade")
+        self.send_header("Sec-WebSocket-Accept", accept)
         self.end_headers()
+        self.close_connection = True
 
-        interval = 1.0 / hz
         try:
-            if not deltas:
-                while True:
-                    payload = json.dumps(
-                        _stream_snapshot(source), separators=(",", ":"))
-                    self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
-                    self.wfile.flush()
-                    time.sleep(interval)
-
-            sent = _stream_snapshot(source)
-            payload = json.dumps(
-                {"stream": "full", "state": sent}, separators=(",", ":"))
-            self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
-            self.wfile.flush()
-
-            next_panel = time.perf_counter() + 1.0 / PANEL_HZ
-            next_slow = time.perf_counter() + 1.0 / SLOW_HZ
-            while True:
-                time.sleep(interval)
-                current = _stream_snapshot(source)
-                now = time.perf_counter()
-
-                # Motion/safety stays at 10 Hz. Text panels update at 2 Hz;
-                # aggregate counters at 1 Hz. Unsent values remain in `sent`,
-                # so their eventual patch is measured from browser state.
-                held = set()
-                if now < next_panel:
-                    held.update(_PANEL_KEYS)
+            for update in self._state_updates(source):
+                payload = json.dumps(update, separators=(",", ":")).encode("utf-8")
+                size = len(payload)
+                if size < 126:
+                    header = bytes((0x81, size))
+                elif size <= 0xFFFF:
+                    header = bytes((0x81, 126)) + struct.pack("!H", size)
                 else:
-                    next_panel = now + 1.0 / PANEL_HZ
-                if now < next_slow:
-                    held.update(_SLOW_KEYS)
-                else:
-                    next_slow = now + 1.0 / SLOW_HZ
-                projected = _at_rate(current, sent, held)
-                patch = _delta(sent, projected)
-                if patch is _NO_CHANGE:
-                    continue
-                sent = projected
-                payload = json.dumps(
-                    {"stream": "delta", "patch": patch},
-                    separators=(",", ":"),
-                )
-                self.wfile.write(f"data: {payload}\n\n".encode("utf-8"))
+                    header = bytes((0x81, 127)) + struct.pack("!Q", size)
+                self.wfile.write(header + payload)
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError, OSError):
-            # The tab was closed or refreshed. Normal, not an error.
             return
 
 
@@ -669,13 +644,7 @@ def serve(world: Optional[World] = None, port: int = 8000,
         sim.world.reslotting_enabled = True
     sim.start()
 
-    compare = None
-    if gateway is None:
-        compare = ComparisonRunner()
-        compare.start()
-
     Handler.sim = sim
-    Handler.compare = compare
 
     # If 8000 is busy, walk up until we find a free port.
     server = None
@@ -712,6 +681,4 @@ def serve(world: Optional[World] = None, port: int = 8000,
         print("\n  Stopping FLEET-X. Bye.\n")
     finally:
         sim.stop()
-        if compare is not None:
-            compare.stop()
         server.server_close()

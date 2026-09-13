@@ -250,6 +250,8 @@ class FleetAgent(Node):
         self.robot.update_priority(now, dt)
         self.robot.reserve_ahead(self.bus, now)
         self.robot.check_clearance(now, dt)
+        if self.robot.consider_reroute(self.grid, now, self.bus):
+            self.get_logger().info(self.robot.last_decision)
 
         # 5. jams that will not clear themselves
         for note in (self.robot.answer_requests(self.grid, now),

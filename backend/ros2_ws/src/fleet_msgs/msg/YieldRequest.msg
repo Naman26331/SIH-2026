@@ -12,3 +12,6 @@ string tag                  # Phase 23: HMAC signature -- see security.py
 string target               # who is being asked to move
 int32[2] resource           # the square wanted
 string reason               # PARKED, CYCLE or BOXED_IN
+string action               # REQUEST, PROPOSE, YIELDING or ACK
+string conflict_id          # stable id shared by the robot pair
+string winner               # robot that keeps its current route

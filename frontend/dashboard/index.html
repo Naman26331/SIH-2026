@@ -518,6 +518,42 @@ let STATE = null;          // latest fleet snapshot
 let CELL = 24, OX = 0, OY = 0;
 let hover = null;
 let selected = "R1";       // which robot your clicks control
+const MOTION_MS = 100;      // backend positions arrive at 10 Hz
+const ROBOT_MOTION = new Map();
+
+function robotVisual(r, at=performance.now()){
+  const motion = ROBOT_MOTION.get(r.robot_id);
+  if (!motion) return {x:r.x, y:r.y};
+  const t = Math.max(0, Math.min(1, (at-motion.started)/motion.duration));
+  return {
+    x: motion.fromX + (motion.toX-motion.fromX)*t,
+    y: motion.fromY + (motion.toY-motion.fromY)*t,
+  };
+}
+
+function updateRobotMotion(before, after, at){
+  const oldById = new Map(((before && before.robots) || [])
+    .map(r => [r.robot_id, r]));
+  const live = new Set();
+  for (const next of ((after && after.robots) || [])){
+    live.add(next.robot_id);
+    const old = oldById.get(next.robot_id);
+    if (!old){
+      ROBOT_MOTION.set(next.robot_id, {fromX:next.x, fromY:next.y,
+        toX:next.x, toY:next.y, started:at, duration:MOTION_MS});
+      continue;
+    }
+    if (old.x === next.x && old.y === next.y) continue;
+    const shown = robotVisual(old, at);
+    const teleported = Math.hypot(next.x-old.x, next.y-old.y) > 2;
+    ROBOT_MOTION.set(next.robot_id, {
+      fromX: teleported ? next.x : shown.x,
+      fromY: teleported ? next.y : shown.y,
+      toX: next.x, toY: next.y, started: at, duration: MOTION_MS,
+    });
+  }
+  for (const id of ROBOT_MOTION.keys()) if (!live.has(id)) ROBOT_MOTION.delete(id);
+}
 
 // The dashboard only ever shows one robot's world-picture at a time, so ask
 // the server for just that one. Sending all of them was 78% of the traffic.
@@ -540,7 +576,7 @@ const PAGE_BUILD = "__PAGE_BUILD__";
 // to re-lay-out the whole sidebar, which is what made it jump about.
 //
 // So: only touch the DOM when the HTML has actually changed.
-const PANEL_MS = 200;        // sidebar refresh: 5 times a second
+const PANEL_MS = 500;        // text/DOM refresh: 2 times a second
 let lastPanels = 0;
 
 const _lastHTML = new Map();
@@ -593,40 +629,45 @@ async function boot(){
 }
 
 function connect(){
-  const es = new EventSource("/api/stream");
-  es.onopen  = () => setLive(true);
-  es.onerror = () => setLive(false);
-  es.onmessage = (e) => {
-    const packet = JSON.parse(e.data);
-    const prev = STATE;
-    if (packet.stream === "full") STATE = packet.state;
-    else if (packet.stream === "delta") STATE = applyStatePatch(STATE, packet.patch);
-    else STATE = packet; // compatibility with older backend
-    setLive(true);
-
-    // If the robot you were watching was removed or the fleet was rebuilt,
-    // fall back to the first one so the panels never go blank.
-    if (STATE.robots.length && !STATE.robots.some(r => r.robot_id === selected)){
-      selected = STATE.robots[0].robot_id;
-      sendFocus();
-    }
-
-    // The MAP is drawn every animation frame from the newest state, so motion
-    // stays smooth. The sidebar only needs to keep up with reading speed --
-    // rebuilding a dozen text panels twenty times a second was most of the
-    // work and none of the benefit.
-    const now = performance.now();
-    if (now - lastPanels < PANEL_MS) { watchAll(prev); return; }
-    lastPanels = now;
-    renderKpis();
-    renderScenario();
-    renderTasks();
-    renderBlocks();
-    renderNetwork();
-    renderRate();
-    renderHealth();
-    watchAll(prev);
+  const scheme = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(`${scheme}//${location.host}/api/ws`);
+  ws.onopen = () => setLive(true);
+  ws.onmessage = e => receiveState(e.data);
+  ws.onerror = () => setLive(false);
+  ws.onclose = () => {
+    setLive(false);
+    setTimeout(connect, 1000);
   };
+}
+
+function receiveState(raw){
+  const packet = JSON.parse(raw);
+  const prev = STATE;
+  let next;
+  if (packet.stream === "full") next = packet.state;
+  else if (packet.stream === "delta") next = applyStatePatch(STATE, packet.patch);
+  else next = packet; // compatibility with older backend
+  updateRobotMotion(prev, next, performance.now());
+  STATE = next;
+  setLive(true);
+
+  // If the watched robot vanished, fall back to the first live robot.
+  if (STATE.robots.length && !STATE.robots.some(r => r.robot_id === selected)){
+    selected = STATE.robots[0].robot_id;
+    sendFocus();
+  }
+
+  const now = performance.now();
+  if (now - lastPanels < PANEL_MS) { watchAll(prev); return; }
+  lastPanels = now;
+  renderKpis();
+  renderScenario();
+  renderTasks();
+  renderBlocks();
+  renderNetwork();
+  renderRate();
+  renderHealth();
+  watchAll(prev);
 }
 
 // Backend sends keyed entity patches instead of repeating every robot/task
@@ -882,7 +923,8 @@ function drawPaths(){
     ctx.lineCap="round"; ctx.lineJoin="round";
     ctx.setLineDash([CELL*0.28, CELL*0.28]);
     ctx.beginPath();
-    ctx.moveTo(r.x*CELL+CELL/2, r.y*CELL+CELL/2);
+    const pos = robotVisual(r);
+    ctx.moveTo(pos.x*CELL+CELL/2, pos.y*CELL+CELL/2);
     for (const [px,py] of r.path) ctx.lineTo(px*CELL+CELL/2, py*CELL+CELL/2);
     ctx.stroke();
     ctx.restore();
@@ -1042,13 +1084,14 @@ function drawConflicts(){
     const ra = STATE.robots.find(r => r.robot_id === c.robot_a);
     const rb = STATE.robots.find(r => r.robot_id === c.robot_b);
     if (ra && rb){
+      const pa = robotVisual(ra), pb = robotVisual(rb);
       ctx.save();
       ctx.strokeStyle = col; ctx.globalAlpha = .18 + .12*pulse;
       ctx.lineWidth = 1.5; ctx.setLineDash([4,4]);
       ctx.beginPath();
-      ctx.moveTo(ra.x*CELL+CELL/2, ra.y*CELL+CELL/2);
+      ctx.moveTo(pa.x*CELL+CELL/2, pa.y*CELL+CELL/2);
       ctx.lineTo(cx, cy);
-      ctx.lineTo(rb.x*CELL+CELL/2, rb.y*CELL+CELL/2);
+      ctx.lineTo(pb.x*CELL+CELL/2, pb.y*CELL+CELL/2);
       ctx.stroke();
       ctx.restore();
     }
@@ -1122,7 +1165,8 @@ const NOSE = { N:[0,-1], E:[1,0], S:[0,1], W:[-1,0] };
 
 function drawRobots(){
   for (const r of STATE.robots){
-    const cx = r.x*CELL + CELL/2, cy = r.y*CELL + CELL/2;
+    const pos = robotVisual(r);
+    const cx = pos.x*CELL + CELL/2, cy = pos.y*CELL + CELL/2;
     const rad = CELL*0.34;
     // The robot's own colour, ALWAYS. Status used to overwrite it -- two
     // robots meeting both turned amber and looked like one colour, and

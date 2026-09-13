@@ -476,7 +476,7 @@ class World:
             # Phase 6: anyone held up decides whether to wait or go around.
             if self.negotiation_enabled:
                 for robot in self.robots.values():
-                    if robot.consider_reroute(self.grid, self.sim_time):
+                    if robot.consider_reroute(self.grid, self.sim_time, self.bus):
                         self.reroutes += 1
                         self.decisions.append({
                             "sim_time": round(self.sim_time, 2),
