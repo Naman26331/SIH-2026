@@ -279,6 +279,18 @@ class World:
                 })
                 del self.decisions[:-20]
 
+        # The Medic AMR's equivalent of task bidding / pre-positioning: pick a
+        # failed robot to go fix, or head back to the dock. Before decide()
+        # so a freshly-set goal gets its route planned this same tick.
+        for robot in self.robots.values():
+            note = robot.consider_medic_dispatch(self.grid, self.sim_time)
+            if note:
+                self.decisions.append({
+                    "sim_time": round(self.sim_time, 2),
+                    "robot_id": robot.robot_id, "text": note,
+                })
+                del self.decisions[:-20]
+
         for robot in self.robots.values():
             robot.decide(self.grid, cost_fn, self.sim_time)
 
@@ -359,6 +371,8 @@ class World:
 
         for robot in self.robots.values():
             robot.advance(dt)
+
+        self._service_medics()
 
         # Phase 22: people walk too. Anyone with nowhere to go gets a new
         # random destination -- the same idea the old robot free-roam patrol
@@ -615,6 +629,60 @@ class World:
                 "message": f"{robot.robot_id} joined at ({spot.x}, {spot.y}). "
                            f"{len(self.robots)} robots now."}
 
+    # Off to one side, on ordinary floor, away from every FLEET_START_CELLS
+    # spot and every scenario's staging squares -- so adding one never
+    # collides with whatever demo is already set up.
+    MEDIC_HOME = Cell(0, 14)
+    MEDIC_REPAIR_RANGE = 1.5   # squares apart counts as "alongside it"
+
+    def add_medic(self, home: Optional[Cell] = None,
+                 robot_id: str = "MEDIC") -> Dict[str, object]:
+        """Put the repair robot on the floor, parked at its dock.
+
+        It carries no logistics work of its own -- see is_medic guards in
+        Robot._bid_and_claim and Robot.consider_prepositioning -- and goes
+        nowhere until a DistressSignal names a robot for it to reach.
+        """
+        if robot_id in self.robots:
+            return {"ok": False, "message": f"{robot_id} is already on the floor."}
+        dock = home if home is not None else self.MEDIC_HOME
+        if not self.grid.is_walkable(dock):
+            return {"ok": False,
+                    "message": f"({dock.x}, {dock.y}) is not a floor square."}
+        self.add_robot(Robot(robot_id=robot_id, cell=dock, is_medic=True, home=dock))
+        return {"ok": True,
+                "message": f"{robot_id} is on standby at ({dock.x}, {dock.y})."}
+
+    def _service_medics(self) -> None:
+        """A medic that has reached the robot it was sent to fix, fixes it.
+
+        Only World may flip another robot's status -- a Robot object never
+        touches a peer's state directly, the same boundary fail_robot() and
+        revive_robot() already draw -- so the medic itself only ever decides
+        where to go (Robot.consider_medic_dispatch); this is what actually
+        completes the rescue once it physically gets there.
+        """
+        for medic in self.robots.values():
+            if not medic.is_medic or medic.medic_target is None:
+                continue
+            target = self.robots.get(medic.medic_target)
+            if target is None or target.status is not RobotStatus.FAILED:
+                medic.mark_repaired(medic.medic_target)
+                continue
+            dx, dy = medic.x - target.x, medic.y - target.y
+            if dx * dx + dy * dy > self.MEDIC_REPAIR_RANGE ** 2:
+                continue
+            fixed_id = medic.medic_target
+            self.revive_robot(fixed_id)
+            medic.mark_repaired(fixed_id)
+            medic.set_goal(medic.home)
+            self.decisions.append({
+                "sim_time": round(self.sim_time, 2),
+                "robot_id": medic.robot_id,
+                "text": f"{medic.robot_id} repaired {fixed_id} - heading back to dock.",
+            })
+            del self.decisions[:-20]
+
     def remove_robot(self, robot_id: Optional[str] = None) -> Dict[str, object]:
         """Take a robot off the floor.
 
@@ -625,7 +693,13 @@ class World:
         if len(self.robots) <= 1:
             return {"ok": False, "message": "One robot has to stay."}
         if robot_id is None:
-            robot_id = sorted(self.robots, key=lambda r: int(r[1:]))[-1]
+            # The medic does not count as a spare logistics robot to remove
+            # by default, and its id ("MEDIC") does not fit the R<n> pattern
+            # this picks the highest of anyway.
+            removable = [rid for rid, r in self.robots.items() if not r.is_medic]
+            if not removable:
+                return {"ok": False, "message": "No removable robot on the floor."}
+            robot_id = sorted(removable, key=lambda r: int(r[1:]))[-1]
         robot = self.robots.get(robot_id)
         if robot is None:
             return {"ok": False, "message": f"There is no robot called {robot_id}."}
@@ -720,8 +794,25 @@ class World:
         stopped_at = Cell(math.floor(robot.x + 0.5),
                           math.floor(robot.y + 0.5))
         robot.place(stopped_at)
-        robot.status = RobotStatus.FAILED
+        # Release BEFORE marking it FAILED: release_all() only broadcasts its
+        # RELEASE messages "if bus is not None and self.status is not
+        # RobotStatus.FAILED" -- so calling it after flipping the status
+        # (the order this used to run in) silently swallowed every one of
+        # them, and the rest of the fleet kept believing a dead robot still
+        # owned its last-claimed squares until those bookings simply expired.
         robot.release_all(self.bus, self.sim_time)
+        robot.status = RobotStatus.FAILED
+        # Say so immediately, not left to a stale-notebook timeout. A failed
+        # robot's own communicate() returns before publishing anything ever
+        # again, so without this, every peer's picture of it just goes quiet
+        # -- which is indistinguishable from a dropped packet for up to
+        # DEFAULT_STALE_AFTER seconds. This is what lets Robot._live_peer
+        # (and the hard block in Robot._track_failed_peers) react at once.
+        robot.seq += 1
+        self.bus.publish(security.seal(Heartbeat(
+            robot_id=robot_id, timestamp=self.sim_time, seq=robot.seq,
+            battery=robot.battery, status=RobotStatus.FAILED.value,
+        )))
         held = self.board.release_all(robot_id)
         # Tell everyone, or the other robots keep the job down as "R2's" and
         # nobody ever picks it up. Continues the robot's own sequence space

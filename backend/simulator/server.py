@@ -30,6 +30,13 @@ if _SHARED not in sys.path:
 
 from fleetx_core import Cell, World, phase1_world, phase2_world   # noqa: E402
 from scenarios import Scenarios   # noqa: E402
+from comms_logger import CommsLogger   # noqa: E402
+
+# Where every message crossing the fleet bus gets written, one row each, for
+# the run currently live on this process. Override with FLEETX_COMMS_LOG if
+# you want it somewhere else (e.g. a mounted volume in production).
+DEFAULT_COMMS_LOG = os.environ.get(
+    "FLEETX_COMMS_LOG", os.path.join(_HERE, "logs", "communications.csv"))
 
 # A stamp for "which version of the code is this?".
 #
@@ -209,10 +216,22 @@ class Simulation:
     def __init__(self, world: World):
         self.mode = "simulator"
         self.world = world
+        # The Medic AMR: idle at its dock until a DistressSignal names a
+        # failed robot for it to reach. Added here, not inside phase2_world()
+        # / fleet_world(), so it never changes the robot count the hand-built
+        # demos (head_on, intersection, deadlock) rely on -- those still work
+        # on a bare world built without going through Simulation.
+        if not any(r.is_medic for r in world.robots.values()):
+            world.add_medic()
         self.scenarios = Scenarios(world)
         self.lock = threading.Lock()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # Every message any robot (or the world itself) publishes, logged to
+        # a CSV as it happens. See comms_logger.py for the row format.
+        self.comms_logger = CommsLogger(DEFAULT_COMMS_LOG, world=world)
+        if hasattr(self.world.bus, "on_publish"):
+            self.world.bus.on_publish = self.comms_logger.log
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="sim", daemon=True)
@@ -220,6 +239,7 @@ class Simulation:
 
     def stop(self) -> None:
         self._stop.set()
+        self.comms_logger.flush()
 
     def _run(self) -> None:
         dt = 1.0 / TICK_HZ

@@ -30,7 +30,7 @@ from .humans import Human
 from . import security
 from .fleet_view import FleetView
 from .grid import Cell, CellKind, Grid
-from .messages import (BlockedAisle, ConflictAlert, Heartbeat,
+from .messages import (BlockedAisle, ConflictAlert, DistressSignal, Heartbeat,
                        IntentUpdate, PathReservation, PoseUpdate, TaskAnnounce,
                        TaskBid, TaskClaim, WaitReport, YieldRequest)
 from .obstacles import DEFAULT_TTL, BlockedMap
@@ -204,6 +204,19 @@ class Robot:
     blocked_map: Optional[BlockedMap] = None
     obstacles_found: int = 0
     _pending_blocks: List[tuple] = field(default_factory=list)
+
+    # --- the repair robot (Medic AMR) ---
+    # An ordinary robot never sets these. A medic never bids on a task or
+    # pre-positions on a hunch (see work_on_tasks/consider_prepositioning) --
+    # it only ever has two destinations: whichever failed robot it has been
+    # asked to reach, and `home` once there is nothing left to do.
+    is_medic: bool = False
+    home: Optional[Cell] = None            # the dock it idles at and returns to
+    medic_target: Optional[str] = None     # robot_id currently being rescued
+    # failed_robot_id -> its last known square, from our own fleet notebook
+    # or a peer's DistressSignal, whichever this robot heard first.
+    _known_distress: Dict[str, Cell] = field(default_factory=dict)
+    _distress_sent_at: Dict[str, float] = field(default_factory=dict)
 
     # --- real jobs (Phase 9) ---
     board: Optional[TaskBoard] = None      # the jobs it knows about
@@ -591,6 +604,17 @@ class Robot:
                                  # while they are near, so the map does not
                                  # carry a phantom wall once they walk off.
 
+    # --- a peer that has failed (Phase 9 status, this robot's reaction) ---
+    FAILED_BLOCK_TTL = 3.0      # re-marked every tick a peer is still known
+                                 # FAILED, so this is really "how long the
+                                 # block survives losing that knowledge" --
+                                 # e.g. once the peer is revived and starts
+                                 # heartbeating again -- not how long a live
+                                 # failure stays blocked. That is permanent.
+    DISTRESS_RESEND_PERIOD = 2.0  # how often to repeat the alarm about the
+                                   # same failed peer, in case the first one
+                                   # (or the only medic in range) missed it.
+
     def travel_speed(self) -> float:
         """How fast it is allowed to drive right now.
 
@@ -708,6 +732,7 @@ class Robot:
             self._ingest_jam_news(message, now)
             self._ingest_blocked_aisle(message, now)
             self._ingest_task_news(message, now)
+            self._ingest_distress(message)
             self.messages_heard += 1
             # Anything at all arriving means the radio is alive.
             self.last_heard_any = now
@@ -715,6 +740,8 @@ class Robot:
 
         if self.status is RobotStatus.FAILED:
             return notes
+
+        self._track_failed_peers(bus, now)
 
         for leases in (self._pibt_rejected_until, self._pibt_accepted_until,
                        self._pibt_completed_until):
@@ -1479,6 +1506,29 @@ class Robot:
             self._pibt_root = ""
         self.priority = max(local_priority, self._pibt_priority)
 
+    def _live_peer(self, peer_id: str, now: float):
+        """The peer's notebook entry, but only when it is still a real
+        negotiating partner -- not one that will never speak again.
+
+        `FleetView.get()` is a plain dict lookup: once a robot has heard from
+        a peer even once, that `Neighbour` sits in `fleet.neighbours`
+        forever, stale or not. Using it directly as "is this peer still
+        there?" was the actual bug behind robots freezing next to a failed
+        one: PIBT kept treating a dead peer as available, asking it to move
+        and waiting for an ACCEPT/REJECT that its `communicate()` had
+        already stopped sending -- forever, since nothing ever timed that
+        out. Checking status and staleness here is what lets the caller fall
+        through to a real SIPP detour instead.
+        """
+        other = self.fleet.get(peer_id)
+        if other is None:
+            return None
+        if other.status == RobotStatus.FAILED.value:
+            return None
+        if other.is_stale(now, self.fleet.stale_after):
+            return None
+        return other
+
     def consider_predicted_conflict(self, grid: Grid, now: float,
                                     bus=None) -> bool:
         """Start distributed PIBT before the robots meet nose-to-nose.
@@ -1517,7 +1567,7 @@ class Robot:
         if conflict is None:
             return False
         peer = conflict.robot_b
-        other = self.fleet.get(peer)
+        other = self._live_peer(peer, now)
         if other is None:
             return False
 
@@ -1600,7 +1650,7 @@ class Robot:
         peer = self.blocked_by
         if peer and not peer.startswith("person:") and peer not in (
                 "unknown", "obstacle", "unreserved"):
-            other = self.fleet.get(peer)
+            other = self._live_peer(peer, now)
             if other is not None:
                 group = self.coordination_group(now)
                 leader = self.coordination_leader(now)
@@ -1727,6 +1777,8 @@ class Robot:
         Real warehouses do not let robots idle in the pick face either. So an
         idle robot steps off onto ordinary floor and waits there.
         """
+        if self.is_medic:
+            return None       # its own dock, not "nearest parking", is home
         if self.charger is not None or self.status is RobotStatus.CHARGING:
             return None               # it is there on purpose
         if self.task is not None or self.goal is not None:
@@ -1767,6 +1819,8 @@ class Robot:
 
         So a wrong guess costs one short empty drive. That is the whole risk.
         """
+        if self.is_medic:
+            return None       # never guesses at logistics work, ever
         if (self.task is not None or self.charger is not None
                 or self.halted or self.status is RobotStatus.FAILED
                 or self.safe_mode
@@ -1836,6 +1890,74 @@ class Robot:
         self.prepositions += 1
         self.set_goal(spot)
         return f"{self.robot_id} {self.staging_why}"
+
+    # ------------------------------------------- the repair robot (Medic AMR)
+
+    def consider_medic_dispatch(self, grid: Grid, now: float) -> Optional[str]:
+        """Idle at the dock until somebody needs rescuing.
+
+        A medic never bids on a task (_bid_and_claim) or pre-positions on a
+        hunch (consider_prepositioning) -- this is its entire job. It has at
+        most one destination at a time: whichever failed robot it has been
+        asked to reach, or `home` once there is nothing left to do. The
+        actual repair -- reviving the peer -- is not this robot's to do; only
+        World can touch another robot's state, so it just gets there and
+        waits (see World._service_medics).
+        """
+        if not self.is_medic:
+            return None
+
+        # Forget anything the fleet no longer believes is actually broken --
+        # revived by this medic, or (more rarely) by another one.
+        for rid in list(self._known_distress):
+            peer = self.fleet.get(rid)
+            if peer is None or peer.status != RobotStatus.FAILED.value:
+                del self._known_distress[rid]
+                if self.medic_target == rid:
+                    self.medic_target = None
+
+        if self.medic_target is not None:
+            peer = self.fleet.get(self.medic_target)
+            if peer is None or peer.status != RobotStatus.FAILED.value:
+                self.medic_target = None    # handled while we were en route
+            else:
+                return None                 # already on the way / on scene
+
+        if self._known_distress:
+            # Deterministic, not "first heard" -- every robot's dict fills in
+            # a different order depending on which reports arrived first.
+            target_id = min(self._known_distress)
+            target_cell = self._known_distress[target_id]
+            staging = self._repair_staging_cell(grid, target_cell)
+            if staging is None:
+                return None                 # boxed in; try again next tick
+            self.medic_target = target_id
+            self.set_goal(staging)
+            return (f"{self.robot_id} dispatched to {target_id} at "
+                    f"({target_cell.x}, {target_cell.y})")
+
+        if self.goal is None and self.home is not None and self.cell != self.home:
+            self.set_goal(self.home)
+        return None
+
+    def _repair_staging_cell(self, grid: Grid, target: Cell) -> Optional[Cell]:
+        """A walkable square next to a failed robot -- close enough to work
+        on it without trying to drive onto the square it is actually
+        standing on, which our own hard block (see _track_failed_peers)
+        correctly refuses to plan a route across anyway."""
+        candidates = [Cell(target.x + 1, target.y), Cell(target.x - 1, target.y),
+                     Cell(target.x, target.y + 1), Cell(target.x, target.y - 1)]
+        walkable = [c for c in candidates if grid.is_walkable(c)]
+        if not walkable:
+            return None
+        return min(walkable,
+                  key=lambda c: (c.x - self.cell.x) ** 2 + (c.y - self.cell.y) ** 2)
+
+    def mark_repaired(self, robot_id: str) -> None:
+        """Forget a rescue once World confirms the robot behind it is fixed."""
+        self._known_distress.pop(robot_id, None)
+        if self.medic_target == robot_id:
+            self.medic_target = None
 
     def _distance_to(self, grid: Grid, cell: Cell, now: float,
                      start: Optional[Cell] = None) -> Optional[float]:
@@ -2088,6 +2210,8 @@ class Robot:
 
     def _bid_and_claim(self, grid: Grid, bus, now: float) -> List[str]:
         notes: List[str] = []
+        if self.is_medic:
+            return notes      # a medic never carries logistics work
         self._reopen_stale_auctions(now)
         open_tasks = self.board.open_tasks()
 
@@ -2487,6 +2611,43 @@ class Robot:
             self.blocked_map.mark(cell, message.robot_id, now,
                                   ttl=DEFAULT_TTL,
                                   confidence=message.confidence)
+
+    def _ingest_distress(self, message) -> None:
+        """A peer is asking for a medic. Remember where, whoever we are.
+
+        Only a medic ever acts on this (see consider_medic_dispatch), but any
+        robot may be the one that hears it first and needs to pass it on --
+        recording it here rather than gating on is_medic keeps that possible
+        without a second code path.
+        """
+        if not isinstance(message, DistressSignal):
+            return
+        self._known_distress[message.failed_robot_id] = Cell(*message.cell)
+
+    def _track_failed_peers(self, bus, now: float) -> None:
+        """Turn "I know X has failed" into "X's square is truly impassable"
+        and "somebody should send help" -- both from purely local knowledge.
+
+        A robot that reports FAILED never sends another message of any kind
+        (see the early return this is called right after, mirrored on the
+        peer's own side) so `note.status` for it never changes again except
+        by revival. That makes it safe to keep re-marking the block and
+        re-raising the alarm for as long as we still believe it: nothing
+        will contradict us except the peer itself coming back to life.
+        """
+        for note in self.fleet.known():
+            if note.status != RobotStatus.FAILED.value:
+                continue
+            cell = Cell(note.cell[0], note.cell[1])
+            self.blocked_map.mark(cell, note.robot_id, now, ttl=self.FAILED_BLOCK_TTL)
+            self._known_distress[note.robot_id] = cell
+            last_sent = self._distress_sent_at.get(note.robot_id, -99.0)
+            if now - last_sent >= self.DISTRESS_RESEND_PERIOD:
+                self._distress_sent_at[note.robot_id] = now
+                self._publish(bus, DistressSignal(
+                    robot_id=self.robot_id, timestamp=now, seq=self.seq,
+                    failed_robot_id=note.robot_id, cell=(cell.x, cell.y),
+                ))
 
     def sense(self, blocked_now: Iterable[Cell], clear_now: Iterable[Cell],
               now: float) -> List[str]:
@@ -3464,4 +3625,7 @@ class Robot:
             "waiting": round(self.waited_for(now), 2),
             "wait_time": round(self.wait_time, 1),
             "refusals": self.refusals,
+            "is_medic": self.is_medic,
+            "home": [self.home.x, self.home.y] if self.home else None,
+            "medic_target": self.medic_target,
         }

@@ -9,3 +9,7 @@
 # teammate needs it, and there is nothing confidential about a .pyc file.
 __pycache__/
 *.pyc
+
+# Fresh every run (see backend/simulator/comms_logger.py) -- a transcript of
+# one session, not something to keep in history or merge between teammates.
+backend/simulator/logs/

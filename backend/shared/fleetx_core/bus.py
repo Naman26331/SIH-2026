@@ -28,7 +28,7 @@ on demo day.
 import random
 from abc import ABC, abstractmethod
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Callable, Deque, Dict, List, Optional, Tuple
 
 
 class FleetBus(ABC):
@@ -60,11 +60,18 @@ class InMemoryBus(FleetBus):
         latency: float = 0.0,          # seconds of delay before delivery
         jitter: float = 0.0,           # random extra delay, 0..jitter seconds
         seed: Optional[int] = None,
+        on_publish: Optional[Callable[[Any], None]] = None,
     ):
         self.packet_loss = packet_loss
         self.latency = latency
         self.jitter = jitter
         self._rng = random.Random(seed)
+        # Optional observer, called with every message right as it is
+        # published -- before loss, batching or delivery are decided. A
+        # plain callback, not an import, so this stays pure logic: whatever
+        # wants to persist a transcript (a CSV logger, a test's spy) lives
+        # outside fleetx_core and is simply handed a function pointer here.
+        self.on_publish: Optional[Callable[[Any], None]] = on_publish
 
         self._inboxes: Dict[str, Deque[Tuple[float, Any]]] = {}
         self._now: float = 0.0
@@ -122,6 +129,8 @@ class InMemoryBus(FleetBus):
         sender = getattr(message, "sender", None) or getattr(message, "robot_id", None)
         self.sent += 1
         self.recent.append(message)
+        if self.on_publish is not None:
+            self.on_publish(message)
 
         if sender in self.silenced:
             self.dropped += 1

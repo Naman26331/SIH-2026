@@ -63,6 +63,10 @@ class Scenarios:
         if not self.auto:
             return
         for rid, robot in self.world.robots.items():
+            # The Medic AMR runs its own dispatch loop (consider_medic_dispatch)
+            # and must never be handed a patrol waypoint.
+            if robot.is_medic:
+                continue
             # Never hijack a robot that is on its way to charge or sitting on a
             # bay. This loop hands a new waypoint to anything briefly without a
             # destination, and it sent a robot on 2.7% off across the warehouse
@@ -105,7 +109,8 @@ class Scenarios:
         self.world.resume_all()
         self.world.reset_counters()
         for robot in self.world.robots.values():
-            robot.clear_goal()
+            if not robot.is_medic:
+                robot.clear_goal()
         self.orders = OrderGenerator(self.world, seed=seed, every=every, limit=limit)
         return (f"Orders running: one every {every:g}s"
                 + (f", {limit} in total" if limit else "") + ".")
@@ -118,8 +123,9 @@ class Scenarios:
         self._routes = self._patrol_routes()
         self.world.reset_counters()
         for robot in self.world.robots.values():
-            robot.clear_goal()
-        n = len(self.world.robots)
+            if not robot.is_medic:
+                robot.clear_goal()
+        n = sum(1 for r in self.world.robots.values() if not r.is_medic)
         return (f"Free roam: all {n} robots patrolling. "
                 "R1, R2 and R3 will meet at (13, 8).")
 
@@ -138,8 +144,8 @@ class Scenarios:
         rng = random.Random(4)
         rng.shuffle(spare)
         pool = iter(spare)
-        for rid in self.world.robots:
-            if rid in routes:
+        for rid, robot in self.world.robots.items():
+            if rid in routes or robot.is_medic:
                 continue
             pair = [next(pool, None), next(pool, None)]
             if None in pair:
@@ -187,7 +193,7 @@ class Scenarios:
         self.auto = False
         self.orders = None
         self.world.resume_all()
-        while len(self.world.robots) < 5:
+        while sum(1 for r in self.world.robots.values() if not r.is_medic) < 5:
             self.world.add_robot_live()
         self.world.reset_counters()
         self._clear_the_floor()
@@ -313,7 +319,8 @@ class Scenarios:
         five stacks, and the collision counter went off, correctly. Now each
         robot gets its own square and we run out of robots before squares.
         """
-        for robot, cell in zip(self.world.robots.values(), self._parking()):
+        movable = [r for r in self.world.robots.values() if not r.is_medic]
+        for robot, cell in zip(movable, self._parking()):
             robot.place(cell)
 
     def _parking(self) -> List[Cell]:
