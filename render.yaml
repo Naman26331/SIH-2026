@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: fleet-x
+    runtime: python
+    plan: free
+    buildCommand: "true"
+    startCommand: "bash start.sh"
+    envVars:
+      - key: FLEETX_SIMULATION
+        value: "true"
+      - key: BACKEND_PORT
+        value: "8001"
+      - key: PYTHON_VERSION
+        value: "3.12.6"
+    healthCheckPath: /

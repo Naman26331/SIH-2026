@@ -33,6 +33,7 @@ class MessageType(str, Enum):
     TASK_ANNOUNCE = "TASK_ANNOUNCE"
     TASK_BID = "TASK_BID"
     TASK_CLAIM = "TASK_CLAIM"
+    DISTRESS_SIGNAL = "DISTRESS_SIGNAL"
 
 
 @dataclass
@@ -398,6 +399,35 @@ class TaskClaim:
         }
 
 
+@dataclass
+class DistressSignal:
+    """"Robot X is down at this square -- send the medic."
+
+    Broadcast by whichever robot currently believes a peer has failed (the
+    same knowledge that turns that peer's last known square into a hard
+    routing block, see Robot.communicate()). Repeated on a slow drumbeat for
+    as long as the failure still looks true, not sent once and forgotten --
+    a medic that was briefly out of range, or a dropped packet, must not be
+    the difference between a robot getting help and sitting there forever.
+    """
+
+    robot_id: str          # who is reporting
+    timestamp: float
+    seq: int
+    failed_robot_id: str
+    cell: Tuple[int, int]
+
+    type: str = field(default=MessageType.DISTRESS_SIGNAL.value, init=False)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": self.type, "robot_id": self.robot_id,
+            "timestamp": round(self.timestamp, 3), "seq": self.seq,
+            "failed_robot_id": self.failed_robot_id,
+            "cell": [self.cell[0], self.cell[1]],
+        }
+
+
 def from_dict(data: Dict[str, Any]):
     """Rebuild a message from plain data.
 
@@ -482,5 +512,10 @@ def from_dict(data: Dict[str, Any]):
             robot_id=data["robot_id"], timestamp=data["timestamp"], seq=data["seq"],
             task_id=data["task_id"], action=data["action"], cost=data.get("cost", 0.0),
             sender=data.get("sender", ""),
+        )
+    if kind == MessageType.DISTRESS_SIGNAL.value:
+        return DistressSignal(
+            robot_id=data["robot_id"], timestamp=data["timestamp"], seq=data["seq"],
+            failed_robot_id=data["failed_robot_id"], cell=tuple(data["cell"]),
         )
     raise ValueError(f"Unknown message type: {kind!r}")
