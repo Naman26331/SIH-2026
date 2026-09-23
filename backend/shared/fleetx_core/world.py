@@ -633,7 +633,8 @@ class World:
     # spot and every scenario's staging squares -- so adding one never
     # collides with whatever demo is already set up.
     MEDIC_HOME = Cell(0, 14)
-    MEDIC_REPAIR_RANGE = 1.5   # squares apart counts as "alongside it"
+    MEDIC_REPAIR_RANGE = 1.5      # squares apart counts as "alongside it"
+    MEDIC_REPAIR_DURATION = 2.5   # seconds standing there before it counts as fixed
 
     def add_medic(self, home: Optional[Cell] = None,
                  robot_id: str = "MEDIC") -> Dict[str, object]:
@@ -654,13 +655,14 @@ class World:
                 "message": f"{robot_id} is on standby at ({dock.x}, {dock.y})."}
 
     def _service_medics(self) -> None:
-        """A medic that has reached the robot it was sent to fix, fixes it.
+        """A medic that has reached the robot it was sent to fix works on it
+        for MEDIC_REPAIR_DURATION seconds, then fixes it.
 
         Only World may flip another robot's status -- a Robot object never
         touches a peer's state directly, the same boundary fail_robot() and
         revive_robot() already draw -- so the medic itself only ever decides
         where to go (Robot.consider_medic_dispatch); this is what actually
-        completes the rescue once it physically gets there.
+        runs the repair once it physically gets there.
         """
         for medic in self.robots.values():
             if not medic.is_medic or medic.medic_target is None:
@@ -668,13 +670,33 @@ class World:
             target = self.robots.get(medic.medic_target)
             if target is None or target.status is not RobotStatus.FAILED:
                 medic.mark_repaired(medic.medic_target)
+                medic.repair_started_at = None
                 continue
+
             dx, dy = medic.x - target.x, medic.y - target.y
             if dx * dx + dy * dy > self.MEDIC_REPAIR_RANGE ** 2:
+                medic.repair_started_at = None    # stepped out of range mid-repair
                 continue
+
+            if medic.repair_started_at is None:
+                medic.repair_started_at = self.sim_time
+                medic.status = RobotStatus.REPAIRING
+                self.decisions.append({
+                    "sim_time": round(self.sim_time, 2),
+                    "robot_id": medic.robot_id,
+                    "text": f"{medic.robot_id} reached {medic.medic_target} - repairing.",
+                })
+                del self.decisions[:-20]
+                continue
+
+            if self.sim_time - medic.repair_started_at < self.MEDIC_REPAIR_DURATION:
+                continue
+
             fixed_id = medic.medic_target
             self.revive_robot(fixed_id)
             medic.mark_repaired(fixed_id)
+            medic.repair_started_at = None
+            medic.status = RobotStatus.IDLE   # let decide() plan the trip home
             medic.set_goal(medic.home)
             self.decisions.append({
                 "sim_time": round(self.sim_time, 2),

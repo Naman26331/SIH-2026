@@ -56,6 +56,7 @@ class RobotStatus(str, Enum):
     CHARGING = "CHARGING"          # sitting on a charger (Phase 13)
     FAILED = "FAILED"              # broken / switched off (Phase 9)
     SAFE_MODE = "SAFE_MODE"        # lost the network, moving carefully (Phase 14)
+    REPAIRING = "REPAIRING"        # the Medic AMR is on scene, fixing a peer
 
 
 # Which way it is facing, purely so the dashboard can draw a nose on it.
@@ -217,6 +218,13 @@ class Robot:
     # or a peer's DistressSignal, whichever this robot heard first.
     _known_distress: Dict[str, Cell] = field(default_factory=dict)
     _distress_sent_at: Dict[str, float] = field(default_factory=dict)
+    # Peers this robot has personally laid eyes on since they failed -- see
+    # _track_failed_peers(). A status byte over the radio is not a sighting.
+    _confirmed_failures: set = field(default_factory=set)
+    # sim_time this medic started standing over the one it is fixing, set by
+    # World._service_medics() once it is close enough to begin, so the repair
+    # takes a few real seconds rather than completing the instant it arrives.
+    repair_started_at: Optional[float] = None
 
     # --- real jobs (Phase 9) ---
     board: Optional[TaskBoard] = None      # the jobs it knows about
@@ -352,6 +360,15 @@ class Robot:
         # and undo the charging status every single tick -- which it did, and
         # ten robots sat on four chargers draining to nothing.
         if self.status is RobotStatus.CHARGING:
+            return
+
+        # The Medic AMR, on scene and fixing a peer. World._service_medics()
+        # owns this status and clears it (back to IDLE) the moment the repair
+        # finishes -- same reason as the CHARGING guard above: with no goal
+        # and no path, deciding would otherwise call it idle every tick and
+        # the dashboard would flicker "REPAIRING" for one tick and never
+        # actually count down.
+        if self.status is RobotStatus.REPAIRING:
             return
 
         # Stopped by a person. Keep the route on screen so you can see what it
@@ -2625,8 +2642,22 @@ class Robot:
         self._known_distress[message.failed_robot_id] = Cell(*message.cell)
 
     def _track_failed_peers(self, bus, now: float) -> None:
-        """Turn "I know X has failed" into "X's square is truly impassable"
-        and "somebody should send help" -- both from purely local knowledge.
+        """Turn "I know X has failed" into "X's square is truly impassable",
+        and -- only once somebody has actually SEEN it -- "send help".
+
+        These are deliberately on different triggers. The hard block is a
+        safety property: any robot that has ever heard X's own last Heartbeat
+        say FAILED must never again try to reserve or PIBT-negotiate for its
+        square, and radio knowledge alone is enough to justify that. A status
+        byte reaching every robot in the building over the fan-out bus is not
+        an "encounter" though -- a real failure is found by a robot that
+        physically gets there, the same as a dropped pallet or a person is
+        (see sense_humans, blocked_map.mark from sight, not from rumour).
+        So the distress call, the thing that actually sends the medic out,
+        waits for local_contacts -- this robot's own LiDAR -- to place
+        something on that exact square. That also means a dashboard "fail
+        this robot" click does not summon the medic on its own: it has to
+        wait for a robot to actually drive past.
 
         A robot that reports FAILED never sends another message of any kind
         (see the early return this is called right after, mirrored on the
@@ -2635,11 +2666,26 @@ class Robot:
         re-raising the alarm for as long as we still believe it: nothing
         will contradict us except the peer itself coming back to life.
         """
+        for rid in list(self._confirmed_failures):
+            peer = self.fleet.get(rid)
+            if peer is None or peer.status != RobotStatus.FAILED.value:
+                self._confirmed_failures.discard(rid)
+                self._known_distress.pop(rid, None)
+                self._distress_sent_at.pop(rid, None)
+
+        seen_now = {c for (_, _, c) in self.local_contacts}
+
         for note in self.fleet.known():
             if note.status != RobotStatus.FAILED.value:
                 continue
             cell = Cell(note.cell[0], note.cell[1])
             self.blocked_map.mark(cell, note.robot_id, now, ttl=self.FAILED_BLOCK_TTL)
+
+            if note.robot_id not in self._confirmed_failures:
+                if cell not in seen_now:
+                    continue          # known by radio only -- not our alarm to raise
+                self._confirmed_failures.add(note.robot_id)
+
             self._known_distress[note.robot_id] = cell
             last_sent = self._distress_sent_at.get(note.robot_id, -99.0)
             if now - last_sent >= self.DISTRESS_RESEND_PERIOD:
