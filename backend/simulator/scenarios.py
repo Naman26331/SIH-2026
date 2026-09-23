@@ -322,6 +322,15 @@ class Scenarios:
         movable = [r for r in self.world.robots.values() if not r.is_medic]
         for robot, cell in zip(movable, self._parking()):
             robot.place(cell)
+        # The medic is not part of the choreography and takes no `_parking()`
+        # square of its own -- send it home so it can never end up sharing one
+        # of these with a robot this loop just parked. Any rescue it was
+        # mid-way through simply resumes from the dock once free again.
+        for robot in self.world.robots.values():
+            if robot.is_medic:
+                robot.medic_target = None
+                robot.repair_started_at = None
+                robot.place(robot.home)
 
     def _parking(self) -> List[Cell]:
         """Squares to park spare robots on: never a staging square, and as far
@@ -341,10 +350,25 @@ class Scenarios:
         Real robots cannot teleport; this is staging, not behaviour. Every
         robot in a scenario is given its own square, and this checks that --
         setting up a demo must never start by putting two robots in one place.
+
+        The Medic AMR is the one exception. It roams wherever a distress call
+        takes it -- including, by chance, one of the exact squares a
+        hand-built demo hard-codes (Cell(21, 8) alone is both R2's start in
+        Intersection and R1's in Deadlock). It is not part of the choreography,
+        so rather than let ITS position abort the whole scenario setup
+        part-way through -- leaving some robots already moved and others not,
+        which looked exactly like "the button doesn't work" -- it is simply
+        sent home first. Any rescue it was mid-way through resumes from the
+        dock once the square is free again (see Robot.consider_medic_dispatch).
         """
         robot = self.world.get(robot_id)
         if robot is None:
             return
+        for other in self.world.robots.values():
+            if other.is_medic and other.cell == at:
+                other.medic_target = None
+                other.repair_started_at = None
+                other.place(other.home)
         clash = [r.robot_id for r in self.world.robots.values()
                  if r.robot_id != robot_id and r.cell == at]
         if clash:

@@ -16,7 +16,7 @@ from .bus import FleetBus, InMemoryBus
 from .conflicts import DEFAULT_HORIZON, Conflict
 from .deadlock import STUCK_SECONDS
 from .obstacles import SENSOR_RANGE, within_range
-from .messages import Heartbeat, TaskAnnounce, TaskClaim
+from .messages import Heartbeat, PoseUpdate, TaskAnnounce, TaskClaim
 from .tasks import Task, TaskBoard, TaskStatus
 from .reservations import Reservation
 from .grid import Cell, CellKind, Grid, default_grid
@@ -830,7 +830,22 @@ class World:
         # -- which is indistinguishable from a dropped packet for up to
         # DEFAULT_STALE_AFTER seconds. This is what lets Robot._live_peer
         # (and the hard block in Robot._track_failed_peers) react at once.
-        robot.seq += 1
+        #
+        # The PoseUpdate matters just as much as the Heartbeat here: a robot
+        # failed mid-step, so its last ORDINARY pose (sent up to POSE_PERIOD
+        # ago, mid-transit) still names the square it was leaving, not the
+        # one `place(stopped_at)` just snapped it onto -- and since it never
+        # speaks again, that stale square would stick in every peer's
+        # notebook forever. That mismatch is exactly what let a robot drive
+        # right past a failed peer's TRUE square without ever reporting it:
+        # its own LiDAR saw one cell, its notebook's memory of the failed
+        # robot said another, and the two never matched.
+        robot.seq += 2
+        self.bus.publish(security.seal(PoseUpdate(
+            robot_id=robot_id, timestamp=self.sim_time, seq=robot.seq - 1,
+            x=robot.x, y=robot.y, cell=(stopped_at.x, stopped_at.y),
+            velocity=0.0, heading=robot.heading,
+        )))
         self.bus.publish(security.seal(Heartbeat(
             robot_id=robot_id, timestamp=self.sim_time, seq=robot.seq,
             battery=robot.battery, status=RobotStatus.FAILED.value,
